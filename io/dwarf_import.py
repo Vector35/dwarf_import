@@ -37,8 +37,8 @@ from elftools.dwarf.constants import (DW_LNS_copy, DW_LNS_set_file, DW_LNE_defin
 from elftools.dwarf.dwarf_expr import GenericExprVisitor
 from elftools.dwarf.die import AttributeValue, DIE
 from elftools.dwarf.locationlists import LocationEntry, BaseAddressEntry
-from dwarf_import.model import Module
-from dwarf_import.model.elements import (
+from ..model import Module
+from ..model.elements import (
   Component, ComponentOrigin, Element,
   ImportedModule, ImportedFunction,
   Function, LocalVariable, LocationType, Location, Parameter,

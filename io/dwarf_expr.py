@@ -20,7 +20,7 @@
 
 from elftools.dwarf.dwarf_expr import struct_parse, bytelist2string, DW_OP_name2opcode, DW_OP_opcode2name
 from elftools.dwarf.descriptions import describe_reg_name, _REG_NAMES_x64
-from dwarf_import.model.elements import ExprOp, LocationType
+from ..model.elements import ExprOp, LocationType
 from typing import List, Optional
 from enum import Enum
 from io import BytesIO
