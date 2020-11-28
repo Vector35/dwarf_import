@@ -34,7 +34,6 @@ from elftools.dwarf.dwarfinfo import DWARFInfo
 from elftools.dwarf.compileunit import CompileUnit
 from elftools.dwarf.descriptions import (describe_DWARF_expr, set_global_machine_arch, describe_reg_name)
 from elftools.dwarf.constants import (DW_LNS_copy, DW_LNS_set_file, DW_LNE_define_file)
-from elftools.dwarf.dwarf_expr import GenericExprVisitor
 from elftools.dwarf.die import AttributeValue, DIE
 from elftools.dwarf.locationlists import LocationEntry, BaseAddressEntry
 from ..model import Module
@@ -371,14 +370,14 @@ class DWARFDB(object):
 
     loc_die, loc_attr = result
     if loc_attr.form in ['DW_FORM_exprloc', 'DW_FORM_block1']:
-      return [LocationEntry(begin_offset=0, end_offset=0, loc_expr=loc_attr.value)]
+      return [LocationEntry(entry_offset=None, begin_offset=0, end_offset=0, loc_expr=loc_attr.value)]
     elif loc_attr.form == 'DW_FORM_sec_offset':
       base = self.get_cu_base_address(loc_die.cu)
       locations = []
       assert(loc_die.cu.dwarfinfo == self._pri._dwarf_info)
       for entry in self._pri.get_location_list(loc_attr.value):
         if isinstance(entry, LocationEntry):
-          locations.append(LocationEntry(begin_offset=base+entry.begin_offset, end_offset=base+entry.end_offset, loc_expr=entry.loc_expr))
+          locations.append(LocationEntry(entry_offset=None, begin_offset=base+entry.begin_offset, end_offset=base+entry.end_offset, loc_expr=entry.loc_expr))
         elif isinstance(entry, BaseAddressEntry):
           base = entry.base_address
         else:
@@ -393,9 +392,9 @@ class DWARFDB(object):
         if isinstance(entry, LocationEntry):
           # print(hex(entry.begin_offset), hex(entry.end_offset), entry.loc_expr)
           if base is None:
-            locations.append(LocationEntry(begin_offset=entry.begin_offset, end_offset=entry.end_offset, loc_expr=entry.loc_expr))
+            locations.append(LocationEntry(entry_offset=None, begin_offset=entry.begin_offset, end_offset=entry.end_offset, loc_expr=entry.loc_expr))
           else:
-            locations.append(LocationEntry(begin_offset=base+entry.begin_offset, end_offset=base+entry.end_offset, loc_expr=entry.loc_expr))
+            locations.append(LocationEntry(entry_offset=None, begin_offset=base+entry.begin_offset, end_offset=base+entry.end_offset, loc_expr=entry.loc_expr))
         elif isinstance(entry, BaseAddressEntry):
           base = entry.base_address
         else:
@@ -564,7 +563,7 @@ class DWARFImporter(object):
 
     if locations != None:
       address = None
-      for begin, end, loc_expr in locations:
+      for _, begin, end, loc_expr in locations:
         loc = self._location_factory.make_location(begin, end, loc_expr)
         if loc and loc.type == LocationType.STATIC_GLOBAL:
           address = loc.expr[0]
@@ -779,7 +778,7 @@ class DWARFImporter(object):
 
   def import_locations(self, element: Element, die: DIE, location_map: Mapping[Element, List[Location]], location_filter):
     # print(f'importing for {element}')
-    for begin, end, loc_expr in self._dwarf_db.get_location_list(die):
+    for _, begin, end, loc_expr in self._dwarf_db.get_location_list(die):
       # print(f'\t\t\t{begin:x} {end:x} {loc_expr}')
       loc = self._location_factory.make_location(begin, end, loc_expr)
       # print(f'\t\t{loc}')
