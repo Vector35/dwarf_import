@@ -52,6 +52,7 @@ class VariableSet(object):
     self._log = logger
     self._binary_view = self._function.view
     self._arch = self._binary_view.arch
+    self._regs = {name.replace('%', ''): reg for name, reg in self._arch.regs.items()}
     self._variables: Mapping[bn.Variable, str] = dict()
     self._index = 900000
     self._addresses = list(map(lambda i: i[1], self._function.instructions))
@@ -156,7 +157,7 @@ class VariableSet(object):
       return self._make_variable(reg_name)
 
     # Find the register using the full-width register name.
-    r = self._arch.regs.get(reg_name)
+    r = self._regs.get(reg_name)
     if r is None:
       return None
     reg_name = r.full_width_reg
@@ -180,7 +181,7 @@ class VariableSet(object):
     return None
 
   def _make_variable(self, reg_name: str) -> Optional[bn.Variable]:
-    full_width_reg_name = self._arch.regs[reg_name].full_width_reg
+    full_width_reg_name = self._regs[reg_name].full_width_reg
     return bn.Variable(
         self._function,
         bn.VariableSourceType.RegisterVariableSourceType,
