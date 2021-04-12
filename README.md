@@ -1,4 +1,4 @@
-# DWARF Import (v1.0.3)
+# DWARF Import (v1.0.4)
 Author: **Vector 35 Inc**
 
 _Imports DWARF Info from ELFs_
@@ -25,7 +25,7 @@ This plugin requires the following minimum version of Binary Ninja:
 
 The following dependencies are required for this plugin:
 
- * pip - pyelftools
+ * pip - pyelftools>=0.27
 
 
 ## License
