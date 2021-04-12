@@ -1,1 +1,1 @@
-elftools
+pyelftools
