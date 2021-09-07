@@ -1,4 +1,4 @@
-# Copyright(c) 2020 Vector 35 Inc
+# Copyright(c) 2020-2021 Vector 35 Inc
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files(the "Software"), to
@@ -20,590 +20,325 @@
 
 import sys
 import logging
-from uuid import UUID, uuid4
-from typing import List, Optional, Iterable, Tuple, Union, Any
-from itertools import chain, tee
+import concurrent.futures
+from uuid import UUID
+from typing import List, Optional, Iterable, Set, Tuple, Union, MutableMapping
 from collections import defaultdict
-from threading import Thread
-from .model import Module, Component, TouchFlags, Observer
-from .model.elements import (
-  Element,
-  Variable,
-  Constant,
-  Location, LocationType,
-  Function, LocalVariable, Parameter, ExprOp,
-  ImportedModule, ImportedFunction, ImportedVariable,
-  Type, ScalarType, CompositeType
+from .model import QualifiedName, Component
+from .mapped_model import AnalysisSession
+from .model.observer import Observer
+from .model.concrete_elements import (
+    Element,
+    Variable,
+    Constant,
+    Function, LocalVariable, Parameter,
+    Type, BaseType, CompositeType, EnumType, StructType, UnionType, ClassType,
+    AliasType, PointerType, ArrayType, FunctionType, ConstType,
+    VariableStorage,
+    VariadicType, VolatileType,
+    PointerToMemberType,
+    StringType
 )
-from binaryninja import BinaryDataNotification
+from .model.locations import LocationType
+from .location_index import LocationIndex, VariableUpdate, VariableUpdateStatus
+from .mapping import BinjaMap
 import binaryninja as bn
-from .io.dwarf_import import import_ELF_DWARF_into_module
-from copy import copy
 
 
-def partition(items, predicate=bool):
-  a, b = tee((predicate(item), item) for item in items)
-  return ((item for pred, item in a if pred), (item for pred, item in b if not pred))
-
-
-class VariableSet(object):
-  def __init__(self, binja_function: bn.Function, logger):
-    self._function = binja_function
-    self._log = logger
-    self._binary_view = self._function.view
-    self._arch = self._binary_view.arch
-    self._regs = {name.replace('%', ''): reg for name, reg in self._arch.regs.items()}
-    self._variables: Mapping[bn.Variable, str] = dict()
-    self._index = 900000
-    self._addresses = list(map(lambda i: i[1], self._function.instructions))
-    self._mlil_insns = list(self._function.mlil.instructions)
-    self._hlil_insns = None
-
-  def __iter__(self):
-    return iter(self._variables.keys())
-
-  @property
-  def hlil_insns(self):
-    if self._hlil_insns is None:
-      try:
-        self._hlil_insns = list(self._function.hlil.instructions)
-      except RecursionError:
-        self._hlil_insns = []
-    return self._hlil_insns
-
-  def add(self, name: str, loc: Location, binja_type = None, overwrite: bool = False) -> Optional[bn.Variable]:
-    v = self._resolve_location(name, loc, binja_type)
-    if v is not None:
-      if v not in self._variables:
-        self._variables[v] = name
-        return v, False
-
-      if self._variables[v] != name:
-        # create a new stack variable.
-        if v.source_type == bn.VariableSourceType.RegisterVariableSourceType:
-          pass
-        elif v.source_type == bn.VariableSourceType.StackVariableSourceType:
-          nv = self._make_stack_variable(v.storage, binja_type=v.type)
-          nv.index = self._index
-          self._index += 1
-          self._variables[v] = name
-          return v, False
-      return v, True
-
-    return None, None
-
-  def _resolve_location(self, name: str, loc: Location, binja_type = None) -> Optional[bn.Variable]:
-    """Resolves a location expression to a local BN Variable, if possible.
-    """
-    if loc.type != LocationType.STATIC_LOCAL:
-      print(loc)
-    assert(loc.type == LocationType.STATIC_LOCAL)
-    if len(loc.expr) == 1:
-      item = loc.expr[0]
-      if isinstance(item, str):
-        # A single register
-        return self._find_register_in_range(loc.begin, loc.end, item)
-      elif isinstance(item, int):
-        self._log.debug(f'Location for local ("{name}") is a global address (0x{item:x}) 0x{loc.begin:x}-0x{loc.end:x}.')
-        return None
-        # A static memory address
-        datavar = self._binary_view.get_data_var_at(item)
-        if datavar is not None:
-          return datavar
-        self._binary_view.define_user_data_var(item, binja_type)
-        return self._binary_view.get_data_var_at(item)
-    elif len(loc.expr) == 3:
-      if loc.expr[2] == ExprOp.ADD:
-        offset = None
-        if loc.expr[0] == ExprOp.CFA:
-          offset = loc.expr[1] - self._arch.address_size
-        elif isinstance(loc.expr[0], str):
-          reg_val = self._reg_is_stack_offset(loc.expr[0], loc.begin, loc.end)
-          if reg_val != None and reg_val.type == bn.RegisterValueType.StackFrameOffset:
-            offset = reg_val.offset + loc.expr[1]
-        if offset is not None:
-          predicate = None if loc.begin == 0 else lambda addr: loc.begin <= addr and addr <= loc.end
-          addresses = filter(predicate, self._addresses)
-          for addr in addresses:
-            v = self._function.get_stack_var_at_frame_offset(offset, addr)
-            if v is not None:
-              return v
-          self._log.warning(f'Unable to find a stack variable ({name}) here {loc}')
-          return None
-        else:
-          self._log.debug(f'TODO: Find a matching SET insn {loc.begin:x}-{loc.end:x}: {loc.expr}')
-          return None
-      else:
-        if loc.expr[2] == ExprOp.VAR_FIELD:
-          self._log.debug(f'TODO: Support some cases of VARFIELD {loc.expr}')
-          return None
-        self._log.warning(f'Unexpected location expression {loc.expr}')
-        return None
-      self._log.error(str(loc))
-      assert(False)
-    return None
-
-  def _reg_is_stack_offset(self, reg_name, begin, end):
-    for insn in self._mlil_insns:
-      if begin == 0 or (begin <= insn.address and insn.address <= end):
-        # Get the base register.
-        reg_val = self._function.get_reg_value_at(insn.address, reg_name)
-        if reg_val.type == bn.RegisterValueType.StackFrameOffset:
-          return reg_val
-    return None
-
-  def _find_register_in_range(self, begin: int, end: int, reg_name: str) -> Optional[bn.Variable]:
-    if begin == self._function.start or begin == 0:
-      return self._make_variable(reg_name)
-
-    # Find the register using the full-width register name.
-    r = self._regs.get(reg_name)
-    if r is None:
-      return None
-    reg_name = r.full_width_reg
-
-    # TODO: Use interval tree query for looking up instructions?
-    for insn in self._mlil_insns:
-      if begin <= insn.address and insn.address <= end:
-        for v in chain(insn.vars_read, insn.vars_written):
-          # if reg_name == 'rdi':
-          #     print(hex(insn.address), insn)
-          if v.source_type == bn.VariableSourceType.RegisterVariableSourceType:
-            if self._arch.get_reg_name(v.storage) == reg_name:
-              return v
-
-    for insn in self.hlil_insns:
-      if begin <= insn.address and insn.address <= end:
-        for v in filter(lambda opnd: isinstance(opnd, bn.Variable), insn.postfix_operands):
-          if v.source_type == bn.VariableSourceType.RegisterVariableSourceType:
-            if self._arch.get_reg_name(v.storage) == reg_name:
-              return v
-    return None
-
-  def _make_variable(self, reg_name: str) -> Optional[bn.Variable]:
-    full_width_reg_name = self._regs[reg_name].full_width_reg
-    return bn.Variable(
-        self._function,
-        bn.VariableSourceType.RegisterVariableSourceType,
-        index=0,
-        storage=self._arch.get_reg_index(full_width_reg_name),
-        name=reg_name,
-        var_type=bn.Type.int(self._arch.address_size))
-
-  def _make_stack_variable(self, offset: int, binja_type = None) -> Optional[bn.Variable]:
-    var_type = binja_type if binja_type else bn.Type.int(self._arch.address_size)
-    return bn.Variable(
-        self._function,
-        bn.VariableSourceType.StackVariableSourceType,
-        index=13371337,
-        storage=offset,
-        name=f'var_{offset}',
-        var_type=var_type)
-
-  def propagate_variable_names(self):
-    # Using BFS, propagate along SET_VAR operations.
-    fixed_names = set(self._variables.keys())
-    queue = list(fixed_names)
-    while queue:
-      v = queue.pop(0)
-      # Get uses and definitions.
-      # If the encountered variables are not in the fixed set, rename them.
-      if isinstance(v, bn.DataVariable):
-        continue
-      if v.source_type == bn.VariableSourceType.StackVariableSourceType and v.type.type_class == bn.TypeClass.ArrayTypeClass:
-        for insn in self._mlil_insns:
-          if insn.operation == bn.MediumLevelILOperation.MLIL_SET_VAR and insn.src.operation == bn.MediumLevelILOperation.MLIL_ADDRESS_OF:
-            if insn.src.src == v:
-              use_insn: bn.MediumLevelILInstruction = insn
-              d = use_insn.dest
-              if d in fixed_names:
-                continue
-              self._rename_binja_var(d, v.name)
-              d.name = v.name
-              fixed_names.add(d)
-              queue.append(d)
-      else:
-        for use_insn in self._function.mlil.get_var_uses(v):
-          if use_insn.operation == bn.MediumLevelILOperation.MLIL_SET_VAR and use_insn.src.operation == bn.MediumLevelILOperation.MLIL_VAR:
-            d = use_insn.dest
-            if d in fixed_names:
-              continue
-            self._rename_binja_var(d, v.name)
-            d.name = v.name
-            fixed_names.add(d)
-            queue.append(d)
-        for def_insn in self._function.mlil.get_var_definitions(v):
-          if (def_insn.operation == bn.MediumLevelILOperation.MLIL_SET_VAR
-              and (def_insn.src.operation == bn.MediumLevelILOperation.MLIL_VAR
-                   or (def_insn.src.operation == bn.MediumLevelILOperation.MLIL_VAR_FIELD and def_insn.src.src.source_type == bn.VariableSourceType.RegisterVariableSourceType
-                       ))):
-            u = def_insn.src.src
-            if u in fixed_names:
-              continue
-            self._rename_binja_var(u, v.name)
-            u.name = v.name
-            fixed_names.add(u)
-            queue.append(u)
-
-  def _rename_binja_var(self, binja_var: bn.Variable, new_name: str):
-    if new_name is None:
-      return
-    if binja_var.type is None:
-      self._log.error(f'variable "{new_name}" has no type')
-      return
-    if binja_var.source_type == bn.VariableSourceType.StackVariableSourceType:
-      # self._log.debug(f'>>>> creating stack var "{new_name}"')
-      self._function.create_user_stack_var(binja_var.storage, binja_var.type, new_name)
-    else:
-      self._function.create_user_var(binja_var, binja_var.type, new_name)
-
-
-class BinjaBridge(Observer, BinaryDataNotification):
-  """Two-way synchronization between Binja Core and the Sidekick Plugin.
-
-  The bridge is a Module observer which forwards changes to the Binja core.
-  Similarly, the bridge is a BinaryView observer which forwards changes
-  from the core to the Module.
-
-  The Sidekick models elements have a version number which is used
-  for synchronizing.  The bridge maintains the table of the version
-  number of each element which has been forwarded to Binja.  Similarly,
-  the version number is updated when changes from the Binja side
-  result in updates to the Sidekick model elements.
+def rank_of_type(ty: Type) -> int:
+  """Estimates the rank of each type, where higher rank
+  types depend on lower rank types.
   """
+  if ty.name.is_empty:
+    return 100
+  elif isinstance(ty, BaseType):
+    return 0
+  elif isinstance(ty, EnumType):
+    return 0
+  elif isinstance(ty, AliasType):
+    return rank_of_type(ty.resolve_alias())
+  elif isinstance(ty, ArrayType):
+    return rank_of_type(ty.element_type)
+  elif isinstance(ty, CompositeType):
+    ranks = [rank_of_type(f.field.type) for f in ty.fields()]
+    return max(ranks) if len(ranks) > 0 else 0
+  elif isinstance(ty, PointerToMemberType):
+    return 100
+  else:
+    raise NotImplementedError(f'rank_of_type {ty.__class__.__name__}')
 
-  def __init__(self, mapped_model, parameters_mode='inferred'):
-    Observer.__init__(self, set(), dwell_time=1)
+
+class BinjaBridge(Observer, bn.BinaryDataNotification):
+  def __init__(self, session: AnalysisSession, parameters_mode: str = 'inferred'):
+    Observer.__init__(self)
+    bn.BinaryDataNotification.__init__(self)
+    logging.basicConfig(level=logging.INFO)
     self._log = logging.getLogger('Bridge')
-    self._mapped_model = mapped_model
-    self._module = mapped_model.module
-    self._mapping = mapped_model.mapping
+    self._session: AnalysisSession = session
+    self._model = session.model
+    self._mapping: BinjaMap = session.mapping
     self._parameters_mode = parameters_mode
-    self._version_table: Mapping[UUID, int] = dict()
-    self._s2b_types: Mapping[UUID, Union[str, Tuple[str]]] = dict()
-    self._b2s_types: Mapping[Union[str, Tuple[str]], UUID] = dict()
-    self._base_types: Mapping[str, bn.Type] = dict()
-    self._builtin_types = set()
+    self._version_table: MutableMapping[UUID, int] = dict()
+    self._s2b_types: MutableMapping[UUID, bn.Type] = dict()
+    self._b2s_types: MutableMapping[Union[str, Tuple[str]], Type] = dict()
+    self._base_types: MutableMapping[QualifiedName, bn.Type] = dict()
+    self._builtin_types: Set[QualifiedName] = set()
     self._typelib_defined_types = set()
-    self._module.add_observer(self)
-    self._binary_view: bn.BinaryView = mapped_model.binary_view
+    self._session.model.add_observer(self)
+    self._binary_view: bn.BinaryView = session.binary_view
     self._binary_view.register_notification(self)
     self.statistics = defaultdict(int)
     self._batch_mode = False
 
-  def import_debug_info(self):
-    self._log.debug('Running...')
-    # If the mapped model has debug information available,
-    # or if the binary has debug information, import it.
-    # Otherwise, wait for analysis to complete and then
-    # create a global component that contains all of the
-    # functions.
-    debug_info = self._mapped_model.get_debug_info()
-    if debug_info is None:
-      self._log.debug('No debug info; creating a global component')
-      # self._mapped_model.binary_view.update_analysis_and_wait()
-      self._module.add_component(self._create_global_component())
-    else:
-      self._log.debug('Debug info detected; creating components from debug info')
-      # self._mapped_model.binary_view.update_analysis_and_wait()
+  def translate_model(self, max_workers=None):
+    self.translate_model_types()
 
-      # For non-interactive batch import, do not respond to Module events.
-      self._batch_mode = True
-      import_ELF_DWARF_into_module(debug_info, self._module, debug_root=self._mapped_model.debug_root)  # {"globals_filter": lambda n: n == 'main'})
-      self._batch_mode = False
+    for fn in self._session.model.functions:
+      if fn.entry_addr is not None:
+        self._binary_view.create_user_function(fn.entry_addr)
 
-      # Gather all of the defined types across all of the components.
-      self.apply_all_types()
+    self._log.debug('Waiting for auto analysis after defining types and functions...')
+    self._binary_view.update_analysis_and_wait()
 
-      # With the types in place, now translate the components.
-      for c in self._module.traverse_components():
-        self._translate_component(c)
-        # self._binary_view.update_analysis_and_wait()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+      futures = []
+      for v in self._session.model.variables:
+        futures.append(executor.submit(self._translate_variable, v))
 
-  def apply_all_types(self):
-    self._typelib_defined_types = set(self._binary_view.types.keys())
-    types = [ty for c in self._module.traverse_components() for ty in filter(self._mapping.is_newer, c.types)]
-    # Translate these types in a pseudo-topological order.
-    for ty in sorted(types, key=lambda ty: len(ty.members)):
+      futures = []
+      for fn in self._session.model.functions:
+        futures.append(executor.submit(self._translate_function, fn))
+      concurrent.futures.wait(futures)
+
+      self._log.debug('Waiting for auto analysis after translating functions...')
+      self._binary_view.update_analysis_and_wait()
+
+      futures = []
+      for fn in self._session.model.functions:
+        futures.append(executor.submit(self._translate_function_signature, fn))
+      concurrent.futures.wait(futures)
+
+    self._binary_view.commit_undo_actions()
+
+    return True
+
+  def translate_model_types(self, overwrite: bool = False):
+    if overwrite is False:
+      self._typelib_defined_types = set(self._binary_view.types.keys())
+
+    for ty in sorted(self._session.model.types, key=lambda ty: rank_of_type(ty)):
       self._translate_type(ty)
 
-  def _create_model_function(self, binja_function: bn.Function) -> Function:
-    function = Function(name=binja_function.name, start=binja_function.start)
-    function.no_return = not binja_function.can_return
-    return self._mapping.commit(function)
-
-  def on_idle(self, flags):
-    # self.add_children(self.invisibleRootItem(), self._module.submodules)
-    pass
-
-  def on_submodules_added(self, submodules: List[Module]):
-    if self._batch_mode:
-      return
-    for m in submodules:
-      for c in m.traverse_components():
-        self._translate_component(c)
-        self._binary_view.update_analysis()
-    self._binary_view.commit_undo_actions()
-
-  def on_components_added(self, components):
-    if self._batch_mode:
-      return
-    for c in components:
-      self._translate_component(c)
-      self._binary_view.update_analysis()
-    self._binary_view.commit_undo_actions()
-
-  def on_elements_added(self, elements: List[Element]):
-    if isinstance(elements[0].owner, Component):
-      c = elements[0].owner
-      self._translate_component_elements(c, elements)
-    elif isinstance(elements[0].owner, Function):
-      fn = elements[0].function
-      self._translate_function_elements(fn, elements)
-    self._binary_view.update_analysis()
-    self._binary_view.commit_undo_actions()
-
-  def on_submodule_renamed(self, submodule, old_name):
-    pass
-
-  def on_component_renamed(self, component, old_name):
-    pass
-
-  def on_element_renamed(self, element, old_name):
-    if isinstance(element, Function):
-      binja_function = self._binary_view.get_function_at(element.start)
-      if binja_function:
-        self._rename_function(element, binja_function)
-    elif isinstance(element, Variable):
-      binja_variable = self._binary_view.get_data_var_at(element.start)
-      if binja_variable:
-        self._rename_variable(element, binja_variable)
-    else:
-      assert(False)
-
-  def _translate_component(self, component: Component):
+  def _translate_component(self, component: Component, **kwargs):
     self._log.debug(f'Translating component ("{component.name}")')
+
     num_created = 0
-    for start in component.function_starts():
+    for start in filter(None, map(lambda f: f.entry_addr, component.functions())):
       binja_function = self._binary_view.get_function_at(start)
       if binja_function is None:
         self._binary_view.create_user_function(start)
         num_created += 1
-    self._translate_component_elements(component, component.members)
-    self._binary_view.commit_undo_actions()
+    if num_created > 0:
+      self._log.debug(f'Created {num_created} new function(s).')
+      self._log.debug('Waiting for auto analysis...')
+      self._binary_view.update_analysis_and_wait()
 
-  def _translate_component_elements(self, component: Component, elements: Iterable[Element]):
+    self._translate_component_elements(component, component.elements(), **kwargs)
+
+  def _translate_component_elements(
+      self,
+      component: Component,
+      elements: Iterable[Element],
+      do_return_type=True
+  ):
+    mapped_functions = []
     for el in filter(self._mapping.is_newer, elements):
       if isinstance(el, Type):
         self._translate_type(el)
       elif isinstance(el, Variable):
         self._translate_variable(el)
       elif isinstance(el, Function):
-        self._translate_function(el)
+        if self._translate_function(el):
+          mapped_functions.append(el)
       elif isinstance(el, Constant):
         self._translate_constant(el)
-      elif isinstance(el, ImportedModule):
-        self._translate_imported_module(el)
       else:
         self._log.warning(f'untranslated element: {type(el)}')
+
+    if do_return_type is True:
+      self._log.debug('Waiting for auto analysis...')
+      self._binary_view.update_analysis_and_wait()
+      for function in mapped_functions:
+        self._translate_function_signature(function)
 
   def _translate_constant(self, const: Constant):
     pass
 
-  def _translate_imported_module(self, imported_module: ImportedModule):
-    pass
-
   def _translate_variable(self, var: Variable):
-    if var.start is None:
+    if not self._mapping.is_newer(var):
+      return False
+
+    self._version_table[var.uuid] = var.version
+    self._log.debug(f'Translating variable ("{var.name}", {var.version}, {(var.addr if var.addr is not None else 0):x})')
+
+    if var.addr is None or var.type is None:
       self.statistics['num_globals_unresolved'] += 1
-      self._log.debug(f'global variable "{var.name}" has no address')
+      if var.addr is None:
+        self._log.debug(f'Variable "{var.name}" has no address.')
+      if var.type is None:
+        self._log.debug(f'Variable "{var.name}" has no type.')
       return
-    else:
-      self.statistics['num_globals_resolved'] += 1
 
     binja_type = self._construct_binja_type(var.type, as_specifier=True)
 
-    # Redefine or create the variable, as needed.
-    binja_var: bn.DataVariable = self._binary_view.get_data_var_at(var.start)
+    binja_var = self._binary_view.get_data_var_at(var.addr)
     if binja_var is None or binja_var.type != binja_type:
-      self._binary_view.define_user_data_var(var.start, binja_type)
-      binja_var: bn.DataVariable = self._binary_view.get_data_var_at(var.start)
+      self._binary_view.define_user_data_var(var.addr, binja_type)
+      binja_var = self._binary_view.get_data_var_at(var.addr)
 
     if binja_var is None:
-      self._log.error(f'unable to define variable "{var.name}" at 0x{var.start:x}')
+      self._log.error(f'Unable to define variable "{var.name}" at 0x{var.addr:x}')
       return
 
-    # Set the name of the symbol.
-    symbol: bn.Symbol = self._binary_view.get_symbol_at(var.start)
+    symbol = self._binary_view.get_symbol_at(var.addr)
     if symbol is None or symbol.short_name != var.name:
-      name = '::'.join(var.name) if isinstance(var.name, tuple) else var.name
-      self._binary_view.define_user_symbol(bn.Symbol(bn.SymbolType.DataSymbol, var.start, name))
-      # TODO: create a version and include in the mapping
+      self._binary_view.define_user_symbol(bn.Symbol(bn.SymbolType.DataSymbol, var.addr, str(var.name)))
 
-  def _translate_function(self, fn: Function):
-    """
-    Alignment between the function types:
-        1. number of parameters
-        2. alignment of parameters
-    Alignment between the variables and the function parameters:
-        1. is variable a detected parameter?
-    """
+    self.statistics['num_globals_resolved'] += 1
+
+  def _translate_function(self, fn: Function) -> bool:
     if not self._mapping.is_newer(fn):
-      return
+      return False
 
-    # Update the version table.
     self._version_table[fn.uuid] = fn.version
-    self._log.debug(f'Translating function ("{fn.name}", {fn.version})')
+    self._log.debug(f'Translating function ("{fn.name}", {fn.version}, {fn.entry_addr:x})')
 
-    # Ensure that the function exists in the BinaryView.
-    binja_function: bn.Function = self._binary_view.get_function_at(fn.start)
+    binja_function = self._binary_view.get_function_at(fn.entry_addr)
     if binja_function is None:
-      self._binary_view.create_user_function(fn.start)
-      print('Updating analysis and waiting...')
-    #   self._binary_view.update_analysis_and_wait()
-      binja_function = self._binary_view.get_function_at(fn.start)
+      self._binary_view.create_user_function(fn.entry_addr)
+      self._log.info('Updating analysis and waiting...')
+      self._binary_view.update_analysis_and_wait()
+      binja_function = self._binary_view.get_function_at(fn.entry_addr)
       if binja_function is None:
-        self._log.warning(f'Unable to create a function at {fn.start:x}')
-        return
+        self._log.warning(f'Unable to create a function at {fn.entry_addr:x}')
+        return False
 
-    # Set the no-return attribute.
     binja_function.can_return = not fn.no_return
-    prior_ftype = binja_function.function_type
 
-    # Propagate the function name.
     binja_symbol: bn.Symbol = binja_function.symbol
-    if fn.name != None and binja_symbol.full_name != fn.name:
-      self._rename_symbol(binja_symbol, fn.name)
+    if fn.name.is_empty is False and binja_symbol.short_name != str(fn.name):
+      self._rename_symbol(binja_symbol, str(fn.name))
 
-    locals = VariableSet(binja_function, self._log)
-
-    # Update the function type.
+    local_vars = LocationIndex(binja_function, fn.frame_base, self._log)
     if self._parameters_mode == 'inferred':
       for p in fn.parameters:
-        self._translate_parameter(p, binja_function, locals)
+        self._translate_parameter(p, binja_function, local_vars)
+    if fn.variables is not None:
+      for v in fn.variables:
+        self._translate_local_variable(v, binja_function, local_vars)
 
-    # Translate the local variables.
-    for v in fn.variables:
-      self._translate_local_variable(v, binja_function, locals)
+    if fn.inlined_functions:
+      for inlined_function in fn.inlined_functions:
+        self._translate_inlined_function(inlined_function, binja_function, local_vars)
 
-    # Translate the inlined functions.
-    for inlined_function in fn.inlined_functions:
-      self._translate_inlined_function(inlined_function, binja_function, locals)
+    local_vars.propagate_names()
+    return True
 
-    # Propagate local variable names.
-    locals.propagate_variable_names()
+  def _translate_function_signature(self, fn: Function):
+    self._log.debug(f'Translating function signature ("{fn.name}", {fn.version}, {fn.entry_addr:x})')
+
+    binja_fn = self._binary_view.get_function_at(fn.entry_addr)
+    assert(isinstance(binja_fn, bn.Function))
+
+    return_type = bn.Type.void()
+    if fn.return_value is not None:
+      return_type = self._construct_binja_type(fn.return_value.type, as_specifier=True)
 
     if self._parameters_mode == 'declared':
-      self._translate_function_type(fn, binja_function)
+      self._translate_function_type(fn, binja_fn)
 
     elif self._parameters_mode == 'inferred':
-      if len(binja_function.function_type.parameters) != len(fn.parameters):
-        # self._binary_view.update_analysis_and_wait()
+      valid_parameter_names = [p.local_name for p in fn.parameters]
+      binja_params = binja_fn.function_type.parameters
+      any_matched = False
+      n_args = len(binja_params)
+      for i in range(n_args - 1, -1, -1):
+        if binja_params[i].name in valid_parameter_names:
+          n_args = i + 1
+          any_matched = True
+          break
 
-        # Find the first parameter (from the right) whose name has changed.
-        current_ftype = binja_function.function_type
-        last = None
-        for i in range(len(current_ftype.parameters)-1, -1, -1):
-          if i < len(prior_ftype.parameters):
-            if current_ftype.parameters[i].name != prior_ftype.parameters[i].name:
-              last = i
-              break
+      if not any_matched:
+        self._translate_function_type(fn, binja_fn)
+        return
 
-        if last is not None and last+1 < len(current_ftype.parameters):
-          # i is the index of the new last argument
-          new_ftype = bn.Type.function(
-              current_ftype.return_value,
-              current_ftype.parameters[:last+1],
-              current_ftype.calling_convention,
-              current_ftype.has_variable_arguments,
-              current_ftype.stack_adjustment)
-          binja_function.function_type = new_ftype
+      if n_args != len(binja_params) or fn.variadic:
+        func_type: bn.FunctionType = binja_fn.function_type
+        binja_fn.function_type = bn.Type.function(
+            return_type,
+            binja_params[:n_args],
+            func_type.calling_convention,
+            fn.variadic,
+            func_type.stack_adjustment)
+        return
 
-  def _translate_inlined_function(self, inlined_function: Function, binja_function: bn.Function, locals: VariableSet):
-    # self._log.debug(f'        /{inlined_function.name}/')
+      if return_type != binja_fn.function_type.return_value:
+        binja_fn.return_type = return_type
+
+  def _translate_inlined_function(
+      self,
+      inlined_function: Function,
+      binja_function: bn.Function,
+      local_vars: LocationIndex
+  ):
     for p in inlined_function.parameters:
       if p.name and p.name != 'this':
-        self._translate_parameter(p, binja_function, locals)
-    self._translate_function_elements(inlined_function, (), binja_function, locals)
+        self._translate_parameter(p, binja_function, local_vars)
+    self._translate_function_elements(inlined_function, (), binja_function, local_vars)
 
-  def _translate_function_elements(self, fn: Function, elements: Iterable[Element], binja_function: bn.Function, locals: VariableSet):
-    is_inlined = isinstance(fn.owner, Function)
-    # Ensure that the function exists in the BinaryView.
+  def _translate_function_elements(
+      self,
+      fn: Function,
+      elements: Iterable[Element],
+      binja_function: bn.Function,
+      locals: LocationIndex
+  ):
     for el in elements:
       if isinstance(el, LocalVariable):
         self._translate_local_variable(el, binja_function, locals)
       elif isinstance(el, Parameter):
         self._translate_parameter(el, binja_function, locals)
-    for inlined_function in fn.inlined_functions:
-      self._translate_inlined_function(inlined_function, binja_function, locals)
+    if fn.inlined_functions is not None:
+      for inlined_function in fn.inlined_functions:
+        self._translate_inlined_function(inlined_function, binja_function, locals)
 
   def _translate_type(self, ty: Type):
     """Translation of named types - those which are registered with a name.
     """
-    # Don't redefine the same type (by uuid).
+    if not self._mapping.is_newer(ty):
+      return
     if ty.uuid in self._s2b_types:
       return
-    # Only define types with names.
-    if ty.name is None:
+    if ty.name.is_empty:
       return
-    # Don't redefine types imported from type libaries.
     if ty.name in self._typelib_defined_types:
       return
-    # Don't define composite with no members... what's the point
-    if ty.composite_type is not None and len(ty.members) == 0:
-      return
 
-    # # Only define types with actual definitions.
-    # if ty.composite_type is not None and len(ty.members) == 0:
-    #     return
-    # If the same type name is encountered multiple times,
-    # only translate the type if it is a superset of the previous definition.
-    if ty.name in self._b2s_types:
-      if not self.is_refinement_of(ty, self._b2s_types[ty.name]):
-        return
-
-    # Construct the binja type object.
+    registered_name = ty.name
     binja_type = self._construct_binja_type(ty)
 
-    # Record the 2-way mapping.
     self._s2b_types[ty.uuid] = binja_type
-    self._b2s_types[ty.name] = ty
+    self._b2s_types[registered_name] = ty
 
-    #
-    if binja_type.type_class == bn.TypeClass.NamedTypeReferenceClass:
-      if ty.element is None:
-        assert(binja_type.named_type_reference.name == ty.name)
-      else:
-        # Register a typedef.
-        aliased_type = self._construct_binja_type(ty.element, as_specifier=True)
-        assert(aliased_type.type_class != bn.TypeClass.NamedTypeReferenceClass or aliased_type.named_type_reference.name != ty.name)
-
-        # Is this already defined and does it have the same definition?
-        # If so, then there is nothing to do here.  If not, then we've got multiple
-        # definitions for the alias -- which is a problem.
-        if ty.name in self._binary_view.types:
-          existing_type = self._binary_view.types[ty.name]
-          # if aliased_type.type_class == existing_type.type_class:
-          #     return
-
-        self._log.debug(f'(ntr) defining typedef {ty.name} as {aliased_type} ({aliased_type.type_class.name})')
-        assert(ty.name not in self._binary_view.types)
-        self._binary_view.define_user_type(ty.name, aliased_type)
+    if registered_name in self._builtin_types:
+      self._log.debug(f'Not translating built-in type {registered_name} as {binja_type} ({binja_type.type_class.name})')
       return
 
-    # Don't register types that are recognized as built-ins.
-    if ty.name in self._builtin_types:
-      self._log.debug(f'built-in type {ty.name} as {binja_type} ({binja_type.type_class.name})')
-      return
-
-    # Register the type with the binary view.
-    assert(binja_type.type_class != bn.TypeClass.NamedTypeReferenceClass)
-    self._log.debug(f'defining user type {ty.name} as {binja_type} ({binja_type.type_class.name})')
-    if ty.name in self._binary_view.types:
-      print(f'defining user type {ty.name} as {binja_type} ({binja_type.type_class.name})')
-      print(f'\tpreviously {self._binary_view.types[ty.name]}')
-    # assert(ty.name not in self._binary_view.types)
-    self._binary_view.define_user_type(ty.name, binja_type)
+    if registered_name in self._binary_view.types:
+      self._log.debug(
+          f'Redefining {registered_name} as {binja_type} '
+          f'(previously {self._binary_view.types[ty.name]})')
+    self._binary_view.define_user_type(str(registered_name), binja_type)
 
   def is_refinement_of(self, a, b) -> bool:
     if a.name != b.name:
@@ -612,236 +347,263 @@ class BinjaBridge(Observer, BinaryDataNotification):
       return True
     return False
 
+  def _generate_typeid(self, name: Union[str, Tuple[str]]) -> str:
+    typeid = self._binary_view.get_type_id(str(name))
+    if typeid is not None:
+      return typeid
+
+    self._binary_view.define_user_type(str(name), bn.Type.void())
+    typeid = self._binary_view.get_type_id(str(name))
+    assert(typeid is not None)
+    return typeid
+
   def _construct_binja_type(self, ty: Type, as_specifier: bool = False) -> bn.Type:
-    assert(not isinstance(ty, str))
+    binja_type: Optional[bn.Type] = None
+
     if ty.uuid in self._s2b_types:
-      if as_specifier and ty.name is not None:
+      if as_specifier and ty.name.is_anonymous is False:
         ntrc = bn.NamedTypeReferenceClass.UnknownNamedTypeClass
-        if ty.composite_type is not None:
-          if ty.composite_type == CompositeType.CLASS_TYPE:
-            ntrc = bn.NamedTypeReferenceClass.ClassNamedTypeClass
-          elif ty.composite_type == CompositeType.STRUCT_TYPE:
-            ntrc = bn.NamedTypeReferenceClass.StructNamedTypeClass
-          elif ty.composite_type == CompositeType.UNION_TYPE:
-            ntrc = bn.NamedTypeReferenceClass.UnionNamedTypeClass
-          elif ty.composite_type == CompositeType.ENUM_TYPE:
-            ntrc = bn.NamedTypeReferenceClass.EnumNamedTypeClass
-        binja_type = bn.Type.named_type(bn.NamedTypeReference(name=ty.name, type_id=self._generate_typeid(ty.name), type_class=ntrc))
+        if isinstance(ty, ClassType):
+          ntrc = bn.NamedTypeReferenceClass.ClassNamedTypeClass
+        elif isinstance(ty, StructType):
+          ntrc = bn.NamedTypeReferenceClass.StructNamedTypeClass
+        elif isinstance(ty, UnionType):
+          ntrc = bn.NamedTypeReferenceClass.UnionNamedTypeClass
+        elif isinstance(ty, EnumType):
+          ntrc = bn.NamedTypeReferenceClass.EnumNamedTypeClass
+        binja_type = bn.Type.named_type(
+          bn.NamedTypeReferenceBuilder.create(
+            name=bn.QualifiedName(str(ty.name)),
+            type_id=self._generate_typeid(ty.name),
+            type_class=ntrc,
+            width=(0 if ty.byte_size is None else ty.byte_size)
+          )
+        )
       else:
-        return self._s2b_types[ty.uuid]
+        binja_type = self._s2b_types[ty.uuid]
+      return binja_type
 
     bv = self._binary_view
-    if ty.scalar_type:
-      if ty.scalar_type == ScalarType.BASE_TYPE:
-        if ty.name in self._base_types:
-          binja_type = self._base_types[ty.name]
-        else:
-          try:
-            # If this is a parseable type, do that.
-            binja_type, _ = bv.parse_type_string(ty.name)
+    if isinstance(ty, BaseType):
+      if ty.name in self._base_types:
+        binja_type = self._base_types[ty.name]
+      else:
+        try:
+          binja_type, _ = bv.parse_type_string(str(ty.name))
+          self._base_types[ty.name] = binja_type
+          self._builtin_types.add(ty.name)
+        except Exception:
+          if ty.byte_size is not None:
+            binja_type = bn.Type.int(ty.byte_size, 0)
             self._base_types[ty.name] = binja_type
             self._builtin_types.add(ty.name)
-          except:
-            # Otherwise, create a named type reference.
-            binja_type = bn.Type.named_type(bn.NamedTypeReference(name=ty.name, type_id=self._generate_typeid(ty.name)))
+          else:
+            binja_name = bn.QualifiedName(str(ty.name))
+            binja_type = bn.Type.named_type(
+              bn.NamedTypeReferenceBuilder.create(
+                name=binja_name,
+                type_id=self._generate_typeid(ty.name),
+                width=0
+              ),
+            )
             self._base_types[ty.name] = binja_type
-      elif ty.scalar_type == ScalarType.POINTER_TYPE:
-        target_type = self._construct_binja_type(ty.element, as_specifier=as_specifier)
-        binja_type = bn.Type.pointer(bv.arch, target_type, ref_type=bn.ReferenceType.PointerReferenceType)
-      elif ty.scalar_type == ScalarType.REFERENCE_TYPE:
-        target_type = self._construct_binja_type(ty.element, as_specifier=as_specifier)
-        binja_type = bn.Type.pointer(bv.arch, target_type, ref_type=bn.ReferenceType.ReferenceReferenceType)
-      elif ty.scalar_type == ScalarType.RVALUE_REFERENCE_TYPE:
-        target_type = self._construct_binja_type(ty.element, as_specifier=as_specifier)
-        binja_type = bn.Type.pointer(bv.arch, target_type, ref_type=bn.ReferenceType.RValueReferenceType)
-      elif ty.scalar_type == ScalarType.ARRAY_TYPE:
-        element_type = self._construct_binja_type(ty.element, as_specifier=as_specifier)
-        count = 0 if ty.array_count is None else ty.array_count
-        if count > 65535:
-          count = 0
-        binja_type = bn.Type.array(element_type, count)
-    elif ty.composite_type:
-      if as_specifier and ty.name is not None:
+    elif isinstance(ty, PointerType):
+      binja_target_type = self._construct_binja_type(ty.target_type, as_specifier=True)
+      binja_ref_type = bn.ReferenceType.PointerReferenceType
+      if ty.nullable is False:
+        binja_ref_type = bn.ReferenceType.ReferenceReferenceType
+      binja_type = bn.Type.pointer(bv.arch, binja_target_type, ref_type=binja_ref_type)
+    elif isinstance(ty, ArrayType):
+      binja_element_type = self._construct_binja_type(ty.element_type, as_specifier=True)
+      count = 0 if ty.count is None else ty.count
+      if count > 65535:
+        count = 0
+      binja_type = bn.Type.array(binja_element_type, count)
+    elif isinstance(ty, EnumType):
+      if as_specifier and ty.name.is_anonymous is False:
+        ntrc = bn.NamedTypeReferenceClass.EnumNamedTypeClass
+        binja_type = bn.Type.named_type(
+          bn.NamedTypeReferenceBuilder.create(
+            name=bn.QualifiedName(str(ty.name)),
+            type_id=self._generate_typeid(ty.name),
+            type_class=ntrc,
+            width=(0 if ty.byte_size is None else ty.byte_size)
+          )
+        )
+      e = bn.EnumerationBuilder.create(members=[])
+      for m in ty.enumerators:
+        e.append(m.label, m.value)
+      binja_type = bn.Type.enumeration_type(bv.arch, e, ty.byte_size)
+    elif isinstance(ty, CompositeType):
+      if as_specifier and ty.name.is_anonymous is False:
         ntrc = bn.NamedTypeReferenceClass.UnknownNamedTypeClass
-        if ty.composite_type == CompositeType.CLASS_TYPE:
+        if isinstance(ty, ClassType):
           ntrc = bn.NamedTypeReferenceClass.ClassNamedTypeClass
-        elif ty.composite_type == CompositeType.STRUCT_TYPE:
+        elif isinstance(ty, StructType):
           ntrc = bn.NamedTypeReferenceClass.StructNamedTypeClass
-        elif ty.composite_type == CompositeType.UNION_TYPE:
+        elif isinstance(ty, UnionType):
           ntrc = bn.NamedTypeReferenceClass.UnionNamedTypeClass
-        elif ty.composite_type == CompositeType.ENUM_TYPE:
-          ntrc = bn.NamedTypeReferenceClass.EnumNamedTypeClass
-        binja_type = bn.Type.named_type(bn.NamedTypeReference(name=ty.name, type_id=self._generate_typeid(ty.name), type_class=ntrc))
+        binja_type = bn.Type.named_type(
+          bn.NamedTypeReferenceBuilder.create(
+            name=bn.QualifiedName(str(ty.name)),
+            type_id=self._generate_typeid(ty.name),
+            type_class=ntrc,
+            width=(0 if ty.byte_size is None else ty.byte_size)
+          )
+        )
       else:
-        if ty.composite_type in [CompositeType.CLASS_TYPE, CompositeType.STRUCT_TYPE]:
-          struct = bn.Structure()
-          struct.type = bn.StructureType.StructStructureType if ty.composite_type == CompositeType.STRUCT_TYPE else bn.StructureType.ClassStructureType
+        if isinstance(ty, ClassType) or isinstance(ty, StructType):
+          struct = bn.StructureBuilder.create()
+          struct.type = bn.StructureVariant.StructStructureType
+          if isinstance(ty, ClassType):
+            struct.type = bn.StructureVariant.ClassStructureType
           if ty.byte_size is not None:
             struct.width = ty.byte_size
-          for m in ty.members:
-            member_type = self._construct_binja_type(m.element, as_specifier=True)
-            member_name = m.name if m.name is not None else ''
-            if m.offset is not None:
-              struct.insert(m.offset, member_type, member_name)
+          for m in ty.fields():
+            field_type = self._construct_binja_type(m.field.type, as_specifier=True)
+            field_name = m.field.local_name
+            if m.field.offset is not None:
+              struct.insert(m.field.offset, field_type, field_name)
           binja_type = bn.Type.structure_type(struct)
-        elif ty.composite_type == CompositeType.UNION_TYPE:
-          union = bn.Structure()
-          union.type = bn.StructureType.UnionStructureType
+        elif isinstance(ty, UnionType):
+          union = bn.StructureBuilder.create()
+          union.type = bn.StructureVariant.UnionStructureType
           if ty.byte_size is not None:
             union.width = ty.byte_size
-          for m in ty.members:
-            member_type = self._construct_binja_type(m.element, as_specifier=as_specifier)
-            member_name = m.name if m.name is not None else ''
-            if m.offset is not None:
-              union.insert(m.offset, member_type, member_name)
+          for m in ty.fields():
+            field_type = self._construct_binja_type(m.field.type, as_specifier=as_specifier)
+            field_name = m.field.local_name
+            if m.field.offset is not None:
+              union.insert(m.field.offset, field_type, field_name)
           binja_type = bn.Type.structure_type(union)
-        elif ty.composite_type == CompositeType.ENUM_TYPE:
-          e = bn.Enumeration()
-          for m in ty.members:
-            e.append(m.name, m.offset)
-          binja_type = bn.Type.enumeration_type(bv.arch, e, ty.byte_size)
-        elif ty.composite_type == CompositeType.FUNCTION_TYPE:
-          has_variable_args = False
-          ret = self._construct_binja_type(ty.element, as_specifier=True)
-          params = []
-          for param in ty.members:
-            if param.element == Type.variadic():
-              has_variable_args = True
-            else:
-              params.append(self._construct_binja_type(param.element, as_specifier=True))
-          binja_type = bn.Type.function(ret, params, variable_arguments=has_variable_args)
-        elif ty.composite_type == CompositeType.PTR_TO_MEMBER_TYPE:
-          binja_type = self._construct_binja_type(ty.members[1], as_specifier=True)
-    elif ty.name is not None:
-      ntrc = bn.NamedTypeReferenceClass.TypedefNamedTypeClass
-      binja_type = bn.Type.named_type(bn.NamedTypeReference(name=ty.name, type_id=self._generate_typeid(ty.name), type_class=ntrc))
+        else:
+          assert(False)
+    elif isinstance(ty, FunctionType):
+      has_variable_args = False
+      if ty.return_type is None:
+        ret = bn.Type.void()
+      else:
+        ret = self._construct_binja_type(ty.return_type, as_specifier=True)
+      params = []
+      for param_type in ty.parameters:
+        if isinstance(param_type, VariadicType):
+          has_variable_args = True
+        else:
+          params.append(self._construct_binja_type(param_type, as_specifier=True))
+      binja_type = bn.Type.function(ret, params, variable_arguments=has_variable_args)
+    elif isinstance(ty, AliasType):
+      binja_type = self._construct_binja_type(ty.type, as_specifier=not ty.type.name.is_anonymous)
+    elif isinstance(ty, ConstType):
+      binja_type = self._construct_binja_type(ty.type, as_specifier=True)
+      temp = binja_type.mutable_copy()
+      temp.const = True
+      binja_type = temp.immutable_copy()
+    elif isinstance(ty, VolatileType):
+      binja_type = self._construct_binja_type(ty.type, as_specifier=True)
+      temp = binja_type.mutable_copy()
+      temp.volatile = True
+      binja_type = temp.immutable_copy()
+    elif isinstance(ty, PointerToMemberType):
+      mp_struct = bn.StructureBuilder.create()
+      mp_struct.type = bn.StructureVariant.StructStructureType
+      binja_fn_type = self._construct_binja_type(ty.target_type, as_specifier=True)
+      binja_ptr_type = bn.Type.pointer(bv.arch, binja_fn_type, ref_type=bn.ReferenceType.PointerReferenceType)
+      mp_struct.insert(0, binja_ptr_type, 'member')
+      binja_type = bn.Type.structure_type(mp_struct)
+    elif isinstance(ty, StringType):
+      if ty.is_null_terminated is False:
+        assert(ty.byte_size is not None)
+        binja_element_type = bn.Type.int(ty.char_size, sign=False)
+        count = int(ty.byte_size / ty.char_size)
+        if count > 65535:
+          count = 0
+        if not isinstance(count, int):
+          raise Exception(f'invalid count for array. ({ty.byte_size=}) ({ty.char_size=})')
+        binja_type = bn.Type.array(binja_element_type, count)
+      raise NotImplementedError('null terminated string')
     else:
-      if ty.element is None:
-        print(ty.__dict__)
-      assert(ty.element is not None)
-      binja_type = self._construct_binja_type(ty.element, as_specifier=as_specifier).mutable_copy()
-      if ty.is_constant:
-        binja_type.const = True
-      if ty.is_volatile:
-        binja_type.volatile = True
+      raise NotImplementedError(type(ty))
 
     return binja_type
 
-  def _generate_typeid(self, name: Union[str, Tuple[str]]) -> str:
-    typeid = self._binary_view.get_type_id(name)
-    if typeid is not None:
-      return typeid
+  def _translate_parameter(self, param: Parameter, binja_function: bn.Function, local_vars: LocationIndex):
+    sym = binja_function.symbol
+    assert(sym is not None)
 
-    self._binary_view.define_user_type(name, bn.Type.void())
-    typeid = self._binary_view.get_type_id(name)
-    assert(typeid is not None)
-    if typeid is not None:
-      return typeid
+    if len(param.locations) == 0:
+      self._log.debug(f'In {sym.short_name}(): parameter ("{param.name}") has no locations')
+      return
 
-  def _translate_parameter(self, param: Parameter, binja_function: bn.Function, locals: VariableSet):
-    num_resolved = 0
+    if param.type is None:
+      self._log.debug(f'In {sym.short_name}(): parameter ("{param.name}") has no type')
+      return
+
+    binja_type = self._construct_binja_type(param.type, as_specifier=True)
+
+    resolved = False
     for loc in param.locations:
-      # Resolve the location to a MLIL variable.
-      binja_var, preexists = locals.add(param.name, loc)
-      if binja_var is None:
-        continue
-      if preexists:
-        continue
-      if isinstance(binja_var, bn.DataVariable):
-        continue
+      result = local_vars.update_variable(loc, binja_type, param.local_name)
+      if result.status == VariableUpdateStatus.UPDATED:
+        resolved = True
 
-      num_resolved += 1
-      binja_type = self._construct_binja_type(param.type, as_specifier=True)
-
-      # Set the name and type.
-      new_name = param.name if param.name else binja_var.name
-      if binja_var.source_type == bn.VariableSourceType.StackVariableSourceType:
-        # self._log.debug(f'stack user var: storage {binja_var.storage}, name {new_name}')
-        binja_function.create_user_stack_var(binja_var.storage, binja_type, new_name)
-      else:
-        # self._log.debug(str(binja_var)+' '+str(binja_type)+' '+new_name)
-        binja_function.create_user_var(binja_var, binja_type, new_name)
-      if binja_var.name != new_name:
-        binja_var.name = new_name
-
-    if num_resolved == 0:
-      # Don't report errors translating the functions of inlined subroutines.
-      if not isinstance(param.function.owner, Function):
-        issues = []
-        for loc in param.locations:
-          assert(loc.type == LocationType.STATIC_LOCAL)
-          # was the specified location actually in this subroutine?
-          if loc.begin != 0 and binja_function in self._binary_view.get_functions_containing(loc.begin):
-            issues.append(loc)
-        if issues:
-          self.statistics['num_parameters_unresolved'] += 1
-          self._log.debug(f'In {binja_function.symbol.short_name}(): unable to resolve parameter ("{param.name}")')
-          for loc in param.locations:
-            self._log.debug(f'    (0x{loc.begin:08x}, 0x{loc.end:08x}, {loc.expr})')
-        else:
-          if len(param.locations) > 0:
-            self.statistics['num_parameters_other'] += 1
-    else:
+    if resolved:
       self.statistics['num_parameters_resolved'] += 1
-
-  def _translate_local_variable(self, var: LocalVariable, binja_function: bn.Function, locals: VariableSet):
-    num_resolved = 0
-    num_preexists = 0
-    for loc in var.locations:
-      # Resolve the location to a MLIL variable.
-      binja_var, preexists = locals.add(var.name, loc)
-      if binja_var is None:
-        continue
-      if preexists:
-        num_preexists += 1
-        continue
-      if isinstance(binja_var, bn.DataVariable):
-        # A static (local scope) variable.
-        binja_type = self._construct_binja_type(var.type, as_specifier=True)
-        # Set the name of the symbol.
-        symbol: bn.Symbol = self._binary_view.get_symbol_at(binja_var.address)
-        if symbol is None or symbol.short_name != var.name:
-          name = '::'.join(var.name) if isinstance(var.name, tuple) else var.name
-          self._binary_view.define_user_symbol(bn.Symbol(bn.SymbolType.DataSymbol, binja_var.address, name))
-        num_resolved += 1
-        continue
-
-      num_resolved += 1
-      binja_type = self._construct_binja_type(var.type, as_specifier=True)
-      # Coerce to a reference type, as needed
-      if (binja_var.source_type == bn.VariableSourceType.RegisterVariableSourceType
-              and var.type.composite_type is not None and var.type.byte_size is not None
-              and var.type.byte_size > self._binary_view.arch.address_size
-              ):
-        binja_type = bn.Type.pointer(self._binary_view.arch, binja_type, ref_type=bn.ReferenceType.ReferenceReferenceType)
-        self._log.debug(f'in {binja_function.symbol.short_name}, coercing to a reference: {binja_type}')
-
-      # Then set the name and type.
-      new_name = var.name if var.name is not None else binja_var.name
-      if binja_var.source_type == bn.VariableSourceType.StackVariableSourceType:
-        binja_function.create_user_stack_var(binja_var.storage, binja_type, new_name)
-      else:
-        # self._log.debug(f'Creating user variable {binja_var} with name {new_name}')
-        binja_function.create_user_var(binja_var, binja_type, new_name)
-      binja_var.name = var.name
-      binja_var.type = binja_type
-
-    if num_resolved == 0:
-      issues = []
-      for loc in var.locations:
-        assert(loc.type == LocationType.STATIC_LOCAL)
-        if loc.begin != 0 and binja_function in self._binary_view.get_functions_containing(loc.begin):
-          issues.append(loc)
-      if issues:
-        self.statistics['num_variables_unresolved'] += 1
-        self._log.debug(f'In {binja_function.symbol.short_name}()@{binja_function.start:x}: unable to resolve variable ("{var.name}"), # of locations already assigned = {num_preexists}')
-        for loc in issues:
-          self._log.debug(f'    (0x{loc.begin:08x}, 0x{loc.end:08x}, {loc.expr})')
-      else:
-        if len(var.locations) > 0:
-          self.statistics['num_variables_other'] += 1
     else:
+      if param.function.is_inlined:
+        return
+
+      for loc in param.locations:
+        assert(loc.type == LocationType.STATIC_LOCAL)
+        if loc.begin == 0 or binja_function in self._binary_view.get_functions_containing(loc.begin):
+          self.statistics['num_parameters_unresolved'] += 1
+          self._log.debug(
+              f'In {sym.short_name}(): '
+              f'unable to resolve parameter ("{param.name}", # locs = {len(param.locations)})')
+          for loc in param.locations:
+            self._log.debug(f'  --> {loc}')
+          break
+
+  def _translate_local_variable(self, var: LocalVariable, binja_function: bn.Function, local_vars: LocationIndex):
+    sym = binja_function.symbol
+    assert(sym is not None)
+
+    if len(var.locations) == 0:
+      self._log.debug(f'In {sym.short_name}(): local variable has no locations ("{var.name}")')
+      return
+
+    results: List[VariableUpdate] = []
+
+    if var.type is None:
+      self._log.debug(f'In {sym.short_name}(): local variable has no type ("{var.name}")')
+      return
+
+    binja_type = self._construct_binja_type(var.type, as_specifier=True)
+    for loc in var.locations:
+      assert(len(loc.expr) != 1 or not isinstance(loc.expr[0], int))
+      r = local_vars.update_variable(loc, binja_type, var.local_name)
+      results.append(r)
+
+    if any(map(lambda r: r.status == VariableUpdateStatus.CONFLICT, results)):
+      self._log.debug(f'In {sym.short_name}(): local variable has conflicts ("{var.name}")')
+      if var.function.is_inlined is False:
+        self.statistics['num_variable_conflicts'] += 1
+        var.function.set_attribute('has_variable_conflict', True)
+
+    if any(map(lambda r: r.status == VariableUpdateStatus.UPDATED, results)):
       self.statistics['num_variables_resolved'] += 1
+      for r in results:
+        if r.status == VariableUpdateStatus.UPDATED:
+          assert(r.storage_type is not None)
+          assert(r.storage_id is not None)
+          assert(isinstance(r.storage_type, int))
+          assert(isinstance(r.storage_id, int))
+          var.storage.append(VariableStorage(r.storage_type, r.storage_id))
+    else:
+      self._log.debug(f'In {sym.short_name}(): unable to resolve variable ("{var.name}")')
+      for loc in var.locations:
+        self._log.debug(f'  --> {loc}')
+      self.statistics['num_variables_unresolved'] += 1
+    return
 
   def _rename_symbol(self, symbol: bn.Symbol, new_name: str):
     new_symbol = bn.Symbol(symbol.type, symbol.address, new_name, new_name, symbol.raw_name)
@@ -854,125 +616,38 @@ class BinjaBridge(Observer, BinaryDataNotification):
     pass
 
   def _translate_function_type(self, function: Function, binja_function: bn.Function):
-    # Memoize
-    if function.has_attribute('function_type'):
-      function_type = function.get_attribute('function_type')
-      if function_type != binja_function.function_type:
-        binja_function.function_type = function_type
-      return
     try:
-      locals = VariableSet(binja_function, self._log)
-      function_type = self._create_function_type(function, binja_function, locals)
+      local_vars = LocationIndex(binja_function, None, self._log)
+      function_type = self._create_function_type(function, binja_function, local_vars)
       if function_type is not None:
         binja_function.function_type = function_type
-    except:
-      self._log.warning(f'while creating function type', exc_info=sys.exc_info())
+    except Exception:
+      self._log.warning('while creating function type', exc_info=sys.exc_info())
 
-  def _create_function_type(self, function: Function, binja_function: bn.Function, locals: VariableSet) -> Optional[bn.Type]:
-    """Creates a binja function type from the sidekick function.
+  def _create_function_type(
+      self,
+      function: Function,
+      binja_function: bn.Function,
+      local_vars: LocationIndex
+  ) -> Optional[bn.Type]:
+    if function.return_value is not None:
+      return_type = self._construct_binja_type(function.return_value.type, as_specifier=True)
+    else:
+      return_type = bn.Type.void()
 
-    Notes:
-        Because we cannot rely on any existing binja function to have the
-        correct number of parameters (or parameter locations), we use the
-        parameter locations given by the sidekick function.
-    """
-    return_type = self._construct_binja_type(function.return_type, as_specifier=True)
-
-    # Construct the binja parameters.
     parameters = []
     is_variadic = False
     for p in function.parameters:
-      # (p.type == None) means unspecified variadic parameters.
-      # No regular parameters can follow.
-      if p.type is None:
+      if isinstance(p.type, VariadicType):
         is_variadic = True
         break
 
-      # Define the parameter type.
       binja_type = self._construct_binja_type(p.type, as_specifier=True)
+      parameters.append(bn.FunctionParameter(binja_type, p.local_name))
 
-      # Figure out the parameter location.
-      binja_location: Optional[bn.Variable] = None
-      if p.locations:
-        # Use the first location that can be resolved.
-        for loc in p.locations:
-          binja_location, preexists = locals.add(p.name, loc, binja_type=binja_type)
-          if isinstance(binja_location, bn.DataVariable):
-            binja_location = None
-          if binja_location is not None:
-            break
-        if binja_location is None:
-          self._log.warning(f'while creating function type: parameter "{p.name}" could not be resolved to a location.')
-          self._log.warning(p.locations)
-      if binja_location is None:
-        return None
-      parameters.append(bn.FunctionParameter(binja_type, p.name, binja_location))
-
-    return bn.Type.function(return_type, parameters,
-                            calling_convention=binja_function.function_type.calling_convention,
-                            variable_arguments=is_variadic,
-                            stack_adjust=binja_function.function_type.stack_adjustment)
-
-  def data_written(self, view, offset, length):
-    pass
-
-  def data_inserted(self, view, offset, length):
-    pass
-
-  def data_removed(self, view, offset, length):
-    pass
-
-  def function_added(self, view, func):
-    pass
-
-  def function_removed(self, view, func):
-    pass
-
-  def function_updated(self, view, func):
-    pass
-
-  def function_update_requested(self, view, func):
-    pass
-
-  def data_var_added(self, view, var):
-    pass
-
-  def data_var_removed(self, view, var):
-    pass
-
-  def data_var_updated(self, view, var):
-    pass
-
-  def string_found(self, view, string_type, offset, length):
-    pass
-
-  def string_removed(self, view, string_type, offset, length):
-    pass
-
-  def type_defined(self, view, name, type):
-    pass
-
-  def type_undefined(self, view, name, type):
-    pass
-
-  def materialize_from_binja(self, items: Union[Iterable[Any], Any]):
-    element = self.materialize_element_from_binja(items)
-    if element is not None:
-      yield element
-    try:
-      iterator = iter(items)
-    except TypeError:
-      pass  # not iterable
-    else:
-      for item in iterator:
-        yield self.materialize_element_from_binja(item)
-
-  def materialize_element_from_binja(self, item: Any):
-    if isinstance(item, bn.Function):
-      binja_function: bn.Function = item
-      function = Function(name=binja_function.name, start=binja_function.start)
-      self._version_table[function.uuid] = function.version
-      function.no_return = not binja_function.can_return
-      return function
-    else:
-      return None
+    return bn.Type.function(
+        return_type,
+        parameters,
+        calling_convention=binja_function.function_type.calling_convention,
+        variable_arguments=is_variadic,
+        stack_adjust=binja_function.function_type.stack_adjustment)

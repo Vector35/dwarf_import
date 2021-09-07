@@ -1,4 +1,4 @@
-# Copyright(c) 2020 Vector 35 Inc
+# Copyright(c) 2020-2021 Vector 35 Inc
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files(the "Software"), to
@@ -19,10 +19,10 @@
 # IN THE SOFTWARE.
 
 from elftools.dwarf.dwarf_expr import struct_parse, bytelist2string, DW_OP_name2opcode, DW_OP_opcode2name
-from elftools.dwarf.descriptions import describe_reg_name, _REG_NAMES_x64
-from ..model.elements import ExprOp, LocationType
-from typing import List, Optional
-from enum import Enum
+from elftools.dwarf.descriptions import _REG_NAMES_x64, _REG_NAMES_x86
+from .elftools_extras import describe_reg_name, _REG_NAMES_ARM, _REG_NAMES_MIPS, _REG_NAMES_POWERPC, _REG_NAMES_AArch64
+from ..model.locations import ExprOp, LocationType
+from typing import List, Optional, Union
 from io import BytesIO
 
 DW_OP_addr = 0x03
@@ -114,11 +114,6 @@ DW_OP_GNU_addr_index = 0xfb,
 DW_OP_GNU_const_index = 0xfc,
 DW_OP_hi_user = 0xff
 
-# class ExprType(Enum):
-#     CONSTANT_EXPR
-#     STATIC_EXPR
-#     RUNTIME_EXPR
-
 
 class StaticExprEvaluator(object):
   """ A DWARF expression is a sequence of instructions encoded in a block
@@ -170,7 +165,7 @@ class StaticExprEvaluator(object):
 
       # Finally call the post-visit function
       ret = self._after_visit(self._cur_opcode, self._cur_args)
-      if ret is not None and ret == False:
+      if ret is not None and ret is False:
         break
 
   def _after_visit(self, opcode, args):
@@ -209,6 +204,7 @@ class StaticExprEvaluator(object):
         arguments, specified by structs.
     """
     def visitor(opcode):
+      assert(self.stream is not None)
       n = struct_parse(self.structs.Dwarf_uleb128(''), self.stream)
       self._cur_args = [self.stream.read(n)]
     return visitor
@@ -370,6 +366,10 @@ class ExprEval(StaticExprEvaluator):
       regnum = args[0]
       regname = describe_reg_name(regnum, self._arch)
       self._stack.append(regname)
+    elif opcode == DW_OP_bregx:
+      regnum = args[0]
+      regname = describe_reg_name(regnum, self._arch)
+      self._stack.extend([regname, args[1], ExprOp.ADD])
     elif opcode == DW_OP_piece and len(self._stack) == 0:
       # if you run into a DW_OP_piece and the expression stack is
       # empty, then the bytes for the piece are optimized out.
@@ -429,12 +429,19 @@ class ExprEval(StaticExprEvaluator):
       self._stack.append(ExprOp.SHR)
     elif opcode == DW_OP_plus_uconst:
       self._stack.append(ExprOp.PLUS_IMM)
+      self._stack.append(args[0])
     elif opcode == DW_OP_over:
       self._stack.append(ExprOp.OVER)
     elif opcode == DW_OP_implicit_value:
       v = int.from_bytes(args[0], 'little')
       self._stack.append(v)
       self._is_stack_value = True
+
+      # print('Expr:',[hex(x) for x in self.save_expr])
+      # print('Args:', args)
+      # print('Stack:',self._stack)
+      # print('Frame:',self._frame_base)
+      # raise Exception(f'unimplemented opcode: {hex(opcode)} {DW_OP_opcode2name.get(opcode,"UNK")}')
 
     elif DW_OP_lo_user <= opcode and opcode <= DW_OP_hi_user:
       self._stack.append(ExprOp.UNSUPPORTED)
@@ -448,7 +455,9 @@ class ExprEval(StaticExprEvaluator):
         print('Args:', args)
         print('Stack:', self._stack)
         print('Frame:', self._frame_base)
-        raise Exception(f'unimplemented opcode: {hex(opcode)} {DW_OP_opcode2name.get(opcode,"UNK")}\nFrame: {self._frame_base}')
+        raise Exception(
+            f'unimplemented opcode: '
+            f'{hex(opcode)} {DW_OP_opcode2name.get(opcode,"UNK")}\nFrame: {self._frame_base}')
 
 
 """
@@ -581,14 +590,24 @@ class LocExprParser(StaticExprEvaluator):
         DW_OP_bit_piece,
         DW_OP_dup,
         DW_OP_bra,
+        0x2,
         0x0
     ])
 
-
-# _generate_dynamic_values(DW_OP_name2opcode, 'DW_OP_lit', 0, 31, 0x30)
-# _generate_dynamic_values(DW_OP_name2opcode, 'DW_OP_reg', 0, 31, 0x50)
-# _generate_dynamic_values(DW_OP_name2opcode, 'DW_OP_breg', 0, 31, 0x70)
-
+  def _reg_list(self):
+    if self._arch == "AArch64":
+      return _REG_NAMES_AArch64
+    if self._arch == "x86":
+      return _REG_NAMES_x86
+    if self._arch == "x64":
+      return _REG_NAMES_x64
+    if self._arch == 'ARM':
+      return _REG_NAMES_ARM
+    if self._arch == 'MIPS':
+      return _REG_NAMES_MIPS
+    if self._arch == 'PowerPC':
+      return _REG_NAMES_POWERPC
+    assert False, 'unrecognized arch: %s' % self._arch
 
   def _after_visit(self, opcode, args) -> Optional[bool]:
     if opcode == DW_OP_stack_value:
@@ -614,9 +633,16 @@ class LocExprParser(StaticExprEvaluator):
       self._stack.extend([ExprOp.CFA, args[0], ExprOp.ADD])
     elif opcode == DW_OP_regx:
       regnum = args[0]
-      if regnum < len(_REG_NAMES_x64):
+      if regnum < len(self._reg_list()):
         regname = describe_reg_name(regnum, self._arch)
         self._stack.append(regname)
+      else:
+        print('Unsupported reg num:', regnum)
+    elif opcode == DW_OP_bregx:
+      regnum = args[0]
+      if regnum < len(self._reg_list()):
+        regname = describe_reg_name(regnum, self._arch)
+        self._stack.extend([regname, args[1], ExprOp.ADD])
       else:
         print('Unsupported reg num:', regnum)
     elif opcode == DW_OP_piece and len(self._stack) == 0:
@@ -678,12 +704,19 @@ class LocExprParser(StaticExprEvaluator):
       self._stack.append(ExprOp.SHR)
     elif opcode == DW_OP_plus_uconst:
       self._stack.append(ExprOp.PLUS_IMM)
+      self._stack.append(args[0])
     elif opcode == DW_OP_over:
       self._stack.append(ExprOp.OVER)
     elif opcode == DW_OP_implicit_value:
       v = int.from_bytes(args[0], 'little')
       self._stack.append(v)
       self._is_stack_value = True
+
+      # print('Expr:',[hex(x) for x in self.save_expr])
+      # print('Args:', args)
+      # print('Stack:',self._stack)
+      # print('Frame:',self._frame_base)
+      # raise Exception(f'unimplemented opcode: {hex(opcode)} {DW_OP_opcode2name.get(opcode,"UNK")}')
 
     elif DW_OP_lo_user <= opcode and opcode <= DW_OP_hi_user:
       self._stack.append(ExprOp.UNSUPPORTED)
@@ -697,4 +730,6 @@ class LocExprParser(StaticExprEvaluator):
         print('Args:', args)
         print('Stack:', self._stack)
         print('Frame:', self._frame_base)
-        raise Exception(f'unimplemented opcode: {hex(opcode)} {DW_OP_opcode2name.get(opcode,"UNK")}\nFrame: {self._frame_base}')
+        raise Exception(
+            f'unimplemented opcode: '
+            f'{hex(opcode)} {DW_OP_opcode2name.get(opcode,"UNK")}\nFrame: {self._frame_base}')

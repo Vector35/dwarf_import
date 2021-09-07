@@ -20,33 +20,58 @@
 
 import binaryninja as bn
 from .bridge import BinjaBridge
-from .mapping import MappedModel
+from .mapped_model import AnalysisSession
 from elftools.elf.elffile import ELFFile
+import os
 
 
 class DWARF_loader(bn.BackgroundTaskThread):
-  def __init__(self, bv):
+  def __init__(self, bv, file):
     bn.BackgroundTaskThread.__init__(self)
     self.view = bv
-    self.file = bv.file
+    self.file = file
     self.progress = ""
 
   def run(self):
     # Open the binary.
-    mapped_model = MappedModel(binary_view = self.view)
-    if mapped_model.binary_view is None or mapped_model.binary_view.arch is None:
+    analysis_session = AnalysisSession(binary_view = self.view)
+    if analysis_session.binary_view is None or analysis_session.binary_view.arch is None:
       bn.log.log_error("Unable to import dwarf")
 
     # Setup the translator.
-    bridge = BinjaBridge(mapped_model)
-    bridge.import_debug_info()
+    bridge = BinjaBridge(analysis_session)
+    bridge.translate_model()
 
     # Finalize the analysis.
-    mapped_model.binary_view.update_analysis()
+    analysis_session.binary_view.update_analysis()
 
 
 def load_symbols(bv):
-  DWARF_loader(bv).start()
+  try:
+    if bv.query_metadata("dwarf_info_applied") == 1:
+      bn.log.log_warn("DWARF Debug Info has already been applied to this binary view")
+      return
+  except KeyError:
+    bv.store_metadata("dwarf_info_applied", True)
+  DWARF_loader(bv, bv.file).start()
+
+
+def load_symbols_from_file(bv):
+  try:
+    if bv.query_metadata("dwarf_info_applied") == 1:
+      bn.log.log_warn("DWARF Debug Info has already been applied to this binary view")
+      return
+  except KeyError:
+    bv.store_metadata("dwarf_info_applied", True)
+
+  file_choice = bn.interaction.OpenFileNameField("Debug file")
+  bn.interaction.get_form_input([file_choice], "Open debug file")
+
+  if not os.path.exists(file_choice.result):
+    bn.log.log_error(f"Input file `{file_choice.result}` does not exist")
+    return
+
+  DWARF_loader(bv, bn.filemetadata.FileMetadata(file_choice.result)).start()
 
 
 def is_valid(bv):
@@ -60,4 +85,5 @@ def is_valid(bv):
   return raw and elf and ELFFile(bn.binaryview.BinaryReader(bv.file.raw)).has_dwarf_info()
 
 
-bn.PluginCommand.register("DWARF Import", "Load DWARF Symbols", load_symbols, is_valid)
+bn.PluginCommand.register("DWARF Import\Load DWARF Symbols", "Load DWARF Symbols from the current file", load_symbols, is_valid)
+bn.PluginCommand.register("DWARF Import\Load DWARF Symbols From File", "Load DWARF Symbols from another file", load_symbols_from_file, lambda bv: True)

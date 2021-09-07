@@ -1,4 +1,4 @@
-# Copyright(c) 2020 Vector 35 Inc
+# Copyright(c) 2020-2021 Vector 35 Inc
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files(the "Software"), to
@@ -28,3 +28,5 @@ class TouchFlags(Enum):
   TOUCHED_VARIABLES = auto()
   TOUCHED_CONSTANTS = auto()
   TOUCHED_TYPES = auto()
+  TOUCHED_TAGS = auto()
+  TOUCHED_FUNCTION_TYPE = auto()

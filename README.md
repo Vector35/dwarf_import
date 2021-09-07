@@ -1,4 +1,4 @@
-# DWARF Import (v1.0.4)
+# DWARF Import (v1.1.0)
 Author: **Vector 35 Inc**
 
 _Imports DWARF Info from ELFs_
@@ -18,7 +18,7 @@ This loads DWARF info from an ELF and propagates function names, arguments, and 
 
 This plugin requires the following minimum version of Binary Ninja:
 
-* 1904
+* 3000
 
 
 ## Required Dependencies

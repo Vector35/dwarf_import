@@ -1,4 +1,4 @@
-# Copyright(c) 2020-2021 Vector 35 Inc
+# Copyright(c) 2021 Vector 35 Inc
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files(the "Software"), to
@@ -18,24 +18,51 @@
 # FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
 # IN THE SOFTWARE.
 
-from uuid import UUID
-from typing import MutableMapping, Optional
-from .model.concrete_elements import Element
+from enum import Enum
+from dataclasses import dataclass
+from typing import Union, Tuple
 
 
-class BinjaMap(object):
-  def __init__(self, binary_view):
-    self._binary_view = binary_view
-    self._version_table: MutableMapping[UUID, int] = dict()
+class ExprOp(Enum):
+  CFA = 0  # Canonical frame address
+  ADD = 1
+  VAR_FIELD = 2
+  NE = 3
+  GE = 4
+  GT = 5
+  LE = 6
+  LT = 7
+  EQ = 8
+  AND = 9
+  OR = 10
+  MINUS = 11
+  ASHR = 12
+  MUL = 13
+  MOD = 14
+  SHR = 15
+  PLUS_IMM = 16
+  OVER = 17
+  DIV = 18
+  NOT = 19
+  NEG = 20
+  XOR = 21
+  DYNAMIC = 0xfffe
+  UNSUPPORTED = 0xffff
 
-  def is_newer(self, element: Element):
-    if element.uuid not in self._version_table:
-      return True
-    return element.version > self._version_table[element.uuid]
 
-  def commit(self, element: Element) -> Optional[Element]:
-    if element.uuid in self._version_table:
-      if element.version <= self._version_table[element.uuid]:
-        return None
-    self._version_table[element.uuid] = element.version
-    return element
+class LocationType(Enum):
+  STATIC_GLOBAL = 0
+  STATIC_LOCAL = 1
+  DYNAMIC = 2
+  UNSUPPORTED = 3
+
+
+LocationExpression = Tuple[Union[int, str, ExprOp], ...]
+
+
+@dataclass(eq=True, frozen=True)
+class Location:
+  begin: int
+  end: int
+  type: LocationType
+  expr: LocationExpression
