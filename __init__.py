@@ -26,15 +26,16 @@ import os
 
 
 class DWARF_loader(bn.BackgroundTaskThread):
-  def __init__(self, bv, file):
+  def __init__(self, bv, debug_file=None):
     bn.BackgroundTaskThread.__init__(self)
     self.view = bv
-    self.file = file
+    self.debug_file = debug_file
     self.progress = ""
 
   def run(self):
     # Open the binary.
-    analysis_session = AnalysisSession(binary_view = self.view)
+    analysis_session = AnalysisSession(binary_view = self.view, debug_file = self.debug_file)
+
     if analysis_session.binary_view is None or analysis_session.binary_view.arch is None:
       bn.log.log_error("Unable to import dwarf")
 
@@ -53,7 +54,7 @@ def load_symbols(bv):
       return
   except KeyError:
     bv.store_metadata("dwarf_info_applied", True)
-  DWARF_loader(bv, bv.file).start()
+  DWARF_loader(bv).start()
 
 
 def load_symbols_from_file(bv):
@@ -71,7 +72,7 @@ def load_symbols_from_file(bv):
     bn.log.log_error(f"Input file `{file_choice.result}` does not exist")
     return
 
-  DWARF_loader(bv, bn.filemetadata.FileMetadata(file_choice.result)).start()
+  DWARF_loader(bv, file_choice.result).start()
 
 
 def is_valid(bv):

@@ -1,4 +1,4 @@
-# DWARF Import (v1.1.0)
+# DWARF Import (v1.1.1)
 Author: **Vector 35 Inc**
 
 _Imports DWARF Info from ELFs_
