@@ -18,16 +18,20 @@
 # FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
 # IN THE SOFTWARE.
 
-import binaryninja as bn
+from binaryninja import BackgroundTaskThread
+from binaryninja.binaryview import BinaryReader
+from binaryninja.log import log_error, log_warn
+from binaryninja.interaction import OpenFileNameField, get_form_input
+from binaryninja.plugin import PluginCommand
 from .bridge import BinjaBridge
 from .mapped_model import AnalysisSession
 from elftools.elf.elffile import ELFFile
 import os
 
 
-class DWARF_loader(bn.BackgroundTaskThread):
+class DWARF_loader(BackgroundTaskThread):
   def __init__(self, bv, debug_file=None):
-    bn.BackgroundTaskThread.__init__(self)
+    BackgroundTaskThread.__init__(self)
     self.view = bv
     self.debug_file = debug_file
     self.progress = ""
@@ -37,7 +41,7 @@ class DWARF_loader(bn.BackgroundTaskThread):
     analysis_session = AnalysisSession(binary_view = self.view, debug_file = self.debug_file)
 
     if analysis_session.binary_view is None or analysis_session.binary_view.arch is None:
-      bn.log.log_error("Unable to import dwarf")
+      log_error("Unable to import dwarf")
 
     # Setup the translator.
     bridge = BinjaBridge(analysis_session)
@@ -50,7 +54,7 @@ class DWARF_loader(bn.BackgroundTaskThread):
 def load_symbols(bv):
   try:
     if bv.query_metadata("dwarf_info_applied") == 1:
-      bn.log.log_warn("DWARF Debug Info has already been applied to this binary view")
+      log_warn("DWARF Debug Info has already been applied to this binary view")
       return
   except KeyError:
     bv.store_metadata("dwarf_info_applied", True)
@@ -60,16 +64,16 @@ def load_symbols(bv):
 def load_symbols_from_file(bv):
   try:
     if bv.query_metadata("dwarf_info_applied") == 1:
-      bn.log.log_warn("DWARF Debug Info has already been applied to this binary view")
+      log_warn("DWARF Debug Info has already been applied to this binary view")
       return
   except KeyError:
     bv.store_metadata("dwarf_info_applied", True)
 
-  file_choice = bn.interaction.OpenFileNameField("Debug file")
-  bn.interaction.get_form_input([file_choice], "Open debug file")
+  file_choice = OpenFileNameField("Debug file")
+  get_form_input([file_choice], "Open debug file")
 
-  if not os.path.exists(file_choice.result):
-    bn.log.log_error(f"Input file `{file_choice.result}` does not exist")
+  if not file_choice.result or os.path.exists(file_choice.result):
+    log_error(f"Input file `{file_choice.result}` does not exist")
     return
 
   DWARF_loader(bv, file_choice.result).start()
@@ -78,13 +82,15 @@ def load_symbols_from_file(bv):
 def is_valid(bv):
   raw = False
   elf = False
-  for view in bv.file.raw.available_view_types:
+  if not bv.parent_view:
+    return False
+  for view in bv.parent_view.available_view_types:
     if view.name == "ELF":
-      raw = True
-    elif view.name == "Raw":
       elf = True
-  return raw and elf and ELFFile(bn.binaryview.BinaryReader(bv.file.raw)).has_dwarf_info()
+    elif view.name == "Raw":
+      raw = True
+  return raw and elf and ELFFile(BinaryReader(bv.file.raw)).has_dwarf_info()
 
 
-bn.PluginCommand.register("DWARF Import\Load DWARF Symbols", "Load DWARF Symbols from the current file", load_symbols, is_valid)
-bn.PluginCommand.register("DWARF Import\Load DWARF Symbols From File", "Load DWARF Symbols from another file", load_symbols_from_file, lambda bv: True)
+PluginCommand.register("DWARF Import\\Load DWARF Symbols", "Load DWARF Symbols from the current file", load_symbols, is_valid)
+PluginCommand.register("DWARF Import\\Load DWARF Symbols From File", "Load DWARF Symbols from another file", load_symbols_from_file, lambda bv: True)
