@@ -25,10 +25,10 @@
   },
   "dependencies": {
     "pip": [
-      "pyelftools>=0.27"
+      "pyelftools==0.27"
     ]
   },
-  "version": "1.1.1",
+  "version": "1.1.2",
   "author": "Vector 35 Inc",
   "minimumbinaryninjaversion": 3000
 }
