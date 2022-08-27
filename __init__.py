@@ -89,7 +89,9 @@ def is_valid(bv):
       elf = True
     elif view.name == "Raw":
       raw = True
-  return raw and elf and ELFFile(BinaryReader(bv.file.raw)).has_dwarf_info()
+  reader = BinaryReader(bv.file.raw)
+  reader.tell = lambda: reader.offset
+  return raw and elf and ELFFile(reader).has_dwarf_info()
 
 
 PluginCommand.register("DWARF Import\\Load DWARF Symbols", "Load DWARF Symbols from the current file", load_symbols, is_valid)
