@@ -1,4 +1,4 @@
-# Copyright(c) 2020-2021 Vector 35 Inc
+# Copyright(c) 2020-2022 Vector 35 Inc
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files(the "Software"), to
@@ -1429,7 +1429,7 @@ class TypeFactory(object):
         return QualifiedName()
       else:
         return alias
-  
+
   def member_offset_of(self, die: DIE) -> Optional[int]:
     if 'DW_AT_data_member_location' in die.attributes:
       attr = die.attributes['DW_AT_data_member_location']
