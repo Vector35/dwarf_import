@@ -19,8 +19,8 @@
 # IN THE SOFTWARE.
 
 from .analysis_model import AnalysisModel
-from .component import Component
+from .component import Component, AnalysisRealm
 from .qualified_name import QualifiedName
 
 
-__all__ = ['AnalysisModel', 'Component', 'QualifiedName']
+__all__ = ['AnalysisModel', 'AnalysisRealm', 'Component', 'QualifiedName']

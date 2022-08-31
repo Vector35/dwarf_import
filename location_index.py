@@ -1,9 +1,27 @@
-# Copyright (c) 2020 Vector 35 Inc
+# Copyright(c) 2020-2022 Vector 35 Inc
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files(the "Software"), to
+# deal in the Software without restriction, including without limitation the
+# rights to use, copy, modify, merge, publish, distribute, sublicense, and / or
+# sell copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+# IN THE SOFTWARE.
 
 from .model.locations import Location, ExprOp
 from itertools import chain
 from collections import defaultdict
-from typing import MutableMapping, Union, List, Optional, Any
+from typing import MutableMapping, Union, List, Optional, Any, ValuesView, Tuple
 from enum import Enum, auto
 from dataclasses import dataclass
 import binaryninja as bn
@@ -30,68 +48,113 @@ class StackLocation:
   offset: int
 
 
+class LocalVariableFrame(object):
+  def __init__(self, function: bn.Function):
+    self._function = function
+    self._declarations: MutableMapping[bn.CoreVariable, Tuple[str, bn.Type]] = dict()
+
+  def __contains__(self, v: bn.CoreVariable):
+    return v in self._declarations
+
+  def declare_variable(self, v: bn.CoreVariable, name: str, ty: bn.Type):
+    if v not in self._declarations:
+      assert(v.__class__ == bn.CoreVariable)
+      self._declarations[v] = (name, ty)
+      tc = ty._to_core_struct()
+      ignore_disjoint_uses = False
+      bn._binaryninjacore.BNCreateUserVariable(self._function.handle, v.to_BNVariable(), tc, name, ignore_disjoint_uses)
+      return True
+
+    prior_name, prior_type = self._declarations[v]
+    return prior_name == name and prior_type == ty
+
+  def items(self):
+    return self._declarations.items()
+
+
 class LocationIndex(object):
   def __init__(self, function: bn.Function, frame_base: Optional[Union[Location, List[Location]]], log):
     self._function = function
     self._frame_base = frame_base
     self._log = log
     self._binary_view = self._function.view
+    if self._binary_view.arch is None:
+      raise Exception('unable to create a variable index for an undefined architecture (bv.arch is None)')
     self._arch = self._binary_view.arch
+    self._arch_name = self._arch.name if self._arch.name else ''
     self._reg_aliases = {'armv7': {'r13': 'sp', 'r14': 'lr', 'r15': 'pc'},
                          'thumb2': {'r13': 'sp', 'r14': 'lr', 'r15': 'pc'},
                          'ppc': {'MSR': 'msr'}
                          }
-    self._map: MutableMapping[Any, MutableMapping[int, bn.Variable]] = defaultdict(dict)
-    self._updated_set: MutableMapping[bn.Variable, bn.Variable] = dict()
+    self._stack_frame_regs = {
+      'x86_64': ['rbp', 'ebp'],
+      'armv7': ['sp', 'r13'],
+      'thyumb2': ['sp', 'r13']}.get(self._arch_name, list())
+    self._map: MutableMapping[Any, MutableMapping[int, bn.CoreVariable]] = defaultdict(dict)
+    self._local_variables = LocalVariableFrame(self._function)
     self._calc_frame_base()
     self._build_index()
 
   def _calc_frame_base(self):
-    self._stack_offset_adjustment = None
+    self._stack_offset_adjustment = 0
     if isinstance(self._frame_base, Location):
       expr = self._frame_base.expr
       if self._frame_base.begin == 0:
         if expr == (ExprOp.CFA,):
           self._stack_offset_adjustment = -self._arch.address_size
         elif len(expr) == 1 and isinstance(expr[0], str):
-          # Get the value of the frame base pointer.
-          fbreg_value = self._get_register_value(expr[0])
+          fbreg_value = self._get_reg_value_at_first_insn(bn.RegisterName(expr[0]))
           if fbreg_value is not None:
             self._stack_offset_adjustment = -fbreg_value
-          elif expr[0] in ['rbp', 'ebp']:
-            # Special case: assume rbp is 8 when it can't be recovered.
+          elif expr[0] in self._stack_frame_regs:
             self._stack_offset_adjustment = self._arch.address_size
 
-  def _get_register_value(self, reg_name: str) -> Optional[int]:
-    mlil_start = None
-    for insn in self._function.mlil.instructions:
-      mlil_start = insn.address
-      break
-    if mlil_start is None:
-      return None
-    value = self._function.get_reg_value_at(mlil_start, reg_name)
-    if value.type == bn.RegisterValueType.StackFrameOffset:
-      return value.offset
+  def _get_reg_value_at_first_insn(self, reg_name: bn.RegisterName) -> Optional[int]:
+    mlil = self._function.mlil
+    if len(mlil) > 0:
+      first_addr = mlil[0].address
+      value = self._function.get_reg_value_at(first_addr, reg_name)
+      if isinstance(value, bn.StackFrameOffsetRegisterValue):
+        return value.value
     return None
 
   def _build_index(self):
-    # Scan all MLIL instructions
+    mlil = self._function.mlil
+    assert mlil is not None
     for insn in self._function.mlil.instructions:
       if (
-          insn.operation == bn.MediumLevelILOperation.MLIL_TAILCALL
-          or insn.operation == bn.MediumLevelILOperation.MLIL_TAILCALL_UNTYPED
+        insn.operation == bn.MediumLevelILOperation.MLIL_TAILCALL
+        or insn.operation == bn.MediumLevelILOperation.MLIL_TAILCALL_UNTYPED
       ):
         vars_accessed = insn.vars_read
       else:
         vars_accessed = chain(insn.vars_written, insn.vars_read)
-      for v in vars_accessed:
+
+      for v in vars_accessed:  # type: ignore
+        assert(isinstance(v, bn.Variable))
+        assert(isinstance(v._source_type, int))
+        cv = bn.CoreVariable(_source_type=v._source_type, index=v.index, storage=v.storage)
         if v.source_type == bn.VariableSourceType.RegisterVariableSourceType:
-          self._map[self._arch.get_reg_name(v.storage)][insn.address] = v
+          self._map[self._arch.get_reg_name(bn.RegisterIndex(v.storage))][insn.address] = cv
         elif v.source_type == bn.VariableSourceType.StackVariableSourceType:
-          offset = v.storage
-          if self._stack_offset_adjustment is not None:
-            offset += self._stack_offset_adjustment
-          self._map[StackLocation(offset=offset)][insn.address] = v
+          offset = v.storage + self._stack_offset_adjustment
+          self._map[StackLocation(offset=offset)][insn.address] = cv
+        elif v.source_type == bn.VariableSourceType.FlagVariableSourceType:
+          pass
+
+    for v in self._function.vars:
+      cv = bn.CoreVariable(_source_type=v._source_type, index=v.index, storage=v.storage)
+      if v.source_type == bn.VariableSourceType.RegisterVariableSourceType:
+        loc = self._arch.get_reg_name(bn.RegisterIndex(v.storage))
+        if loc not in self._map:
+          self._map[loc][-1] = cv
+      elif v.source_type == bn.VariableSourceType.StackVariableSourceType:
+        offset = v.storage + self._stack_offset_adjustment
+        loc = StackLocation(offset=offset)
+        if loc not in self._map:
+          self._map[loc][-1] = cv
+      else:
+        pass
 
   def update_variable(self, loc: Location, new_type: bn.Type, new_name: str) -> VariableUpdate:
     """Only update a variable if it has not already been updated.
@@ -105,10 +168,10 @@ class LocationIndex(object):
       else:
         if self._arch.name in self._reg_aliases:
           assert(isinstance(expr, str))
-          alias = self._reg_aliases[self._arch.name].get(expr, None)
+          alias = self._reg_aliases[self._arch_name].get(expr, None)
           if alias is not None:
             expr = alias
-        r = self._arch.regs.get(expr)
+        r: bn.RegisterInfo = self._arch.regs.get(expr)  # type: ignore
         if r is None:
           arch = self._function.arch
           assert(arch is not None)
@@ -122,168 +185,91 @@ class LocationIndex(object):
       elif expr[2] == ExprOp.VAR_FIELD:
         expr = expr[0]
       else:
-        # Multiple VAR_FIELDS... then we just build each location
-        # but map the separate pieces to different names.
         self._log.debug(f'Unhandled location expression for "{new_name}": {loc}')
         return VariableUpdate(status=VariableUpdateStatus.LOCATION_EXPRESSION_NOT_SUPPORTED)
     else:
       self._log.debug(f'Unhandled location expression for "{new_name}": {loc}')
       return VariableUpdate(status=VariableUpdateStatus.LOCATION_EXPRESSION_NOT_SUPPORTED)
 
-    # Find the location in the map.
     if expr not in self._map:
-      # If the location is valid for the function,
-      # then just define the variable.
-      if (
-          (loc.begin == 0 or self._function in self._binary_view.get_functions_containing(loc.begin))
-          and isinstance(expr, str)
-      ):
-        v = self._define_register_variable(expr, new_type, new_name)
-        self._updated_set[v] = v
-        self._map[expr][loc.begin] = v
-        return VariableUpdate(
-            status=VariableUpdateStatus.UPDATED,
-            storage_type=int(v.source_type),
-            storage_id=v.storage)
       return VariableUpdate(status=VariableUpdateStatus.LOCATION_NOT_FOUND)
 
-    var_list = []
+    var_list: Union[ValuesView[bn.CoreVariable], List[bn.CoreVariable]]
+
     addr_map = self._map[expr]
     if loc.begin == 0:
       var_list = addr_map.values()
     else:
+      var_list = []
       for addr in addr_map.keys():
-        # DWARF will sometimes refer to the address of the last byte of
-        # an instruction.  So we compute the end address for the test
-        # by taking into account the instruction length.
         end_addr = addr + self._binary_view.get_instruction_length(addr) - 1
         if loc.begin <= addr and end_addr <= loc.end:
           v = addr_map[addr]
           var_list.append(v)
 
     if len(var_list) == 0:
-      # print('NOT FOUND IN ADDRESS RANGE', self._function.name, new_name, loc, self._map)
       return VariableUpdate(status=VariableUpdateStatus.LOCATION_NOT_FOUND)
 
-    result = []
-    for v in var_list:
-      if v in self._updated_set:
-        v = self._updated_set[v]
-        if v.type != new_type or v.name != new_name:
-          result.append(VariableUpdate(status=VariableUpdateStatus.CONFLICT))
-        else:
-          result.append(VariableUpdate(status=VariableUpdateStatus.ALREADY_UPDATED))
+    # Finally, update the variable name and type.
+    result: List[VariableUpdate] = []
+    for cv in var_list:
+      if self._local_variables.declare_variable(cv, new_name, new_type):
+        result.append(VariableUpdate(status=VariableUpdateStatus.UPDATED, storage_type=cv._source_type, storage_id=cv.storage))
       else:
-        self._update_var_name_and_type(v, new_type, new_name)
-        result.append(VariableUpdate(
-            status=VariableUpdateStatus.UPDATED,
-            storage_type=int(v.source_type),
-            storage_id=v.storage))
+        result.append(VariableUpdate(status=VariableUpdateStatus.CONFLICT))
 
-    for r in result:
-      if r.status == VariableUpdateStatus.UPDATED:
-        return r
+    for res in result:
+      if res.status == VariableUpdateStatus.UPDATED:
+        return res
     return result[-1]
 
-  def _update_var_name_and_type(self, var: bn.Variable, ty: bn.Type, name: str):
-    if var.source_type == bn.VariableSourceType.StackVariableSourceType:
-      self._function.create_user_stack_var(var.storage, ty, name)
-    elif var.source_type == bn.VariableSourceType.RegisterVariableSourceType:
-      self._function.create_user_var(var, ty, name)
-    var.name = name
-    var.type = ty
-    self._updated_set[var] = var
-
-  def _update_var_name(self, var: bn.Variable, name: str):
-    if var.source_type == bn.VariableSourceType.StackVariableSourceType:
-      self._function.create_user_stack_var(var.storage, var.type, name)
-    elif var.source_type == bn.VariableSourceType.RegisterVariableSourceType:
-      self._function.create_user_var(var, var.type, name)
-    var.name = name
-    self._updated_set[var] = var
-
-  def _define_register_variable(self, reg_name: str, ty: bn.Type, var_name: str) -> bn.Variable:
-    full_width_reg_name = self._arch.regs[reg_name].full_width_reg
-    v = bn.Variable(
-        self._function,
-        bn.VariableSourceType.RegisterVariableSourceType,
-        0, self._arch.get_reg_index(full_width_reg_name),
-        var_name, ty)
-    self._function.create_user_var(v, v.type, v.name)
-    return v
-
-  # def _make_stack_variable(self, offset: int, binja_type=None) -> Optional[bn.Variable]:
-  #     if binja_type:
-  #         var_type = binja_type
-  #     else:
-  #         var_type = bn.Type.int(self._arch.address_size)
-  #         var_type.confidence = 1
-  #     return bn.Variable(
-  #         self._function,
-  #         bn.VariableSourceType.StackVariableSourceType,
-  #         index=13371337,
-  #         storage=offset,
-  #         name=f'var_{offset}',
-  #         var_type=var_type)
-
   def propagate_names(self):
-    # Using BFS, propagate along SET_VAR operations.
-    queue = list(self._updated_set.values())
+    """Using BFS, propagate along SET_VAR operations.
+    """
+    queue = list(self._local_variables.items())
     while queue:
-      v = queue.pop(0)
-      # Get uses and definitions.
-      # If the encountered variables are not in the fixed set, rename them.
-      if isinstance(v, bn.DataVariable):
-        continue
+      cv, (name, ty) = queue.pop(0)
 
       if (
-          v.source_type == bn.VariableSourceType.StackVariableSourceType
-          and v.type is not None
-          and v.type.type_class == bn.TypeClass.ArrayTypeClass
+        cv.source_type == bn.VariableSourceType.StackVariableSourceType
+        and ty.type_class == bn.TypeClass.ArrayTypeClass
       ):
-        # We can't call get_var_uses() because often the variable's
-        # address is taken and that's not a use of the variable's value.
-        # However, we still want to propagate because that is how we
-        # obtain references to stack variables.
         for insn in self._function.mlil.instructions:
-          # When taking the address of a variable we only want to
-          # propagate the name to the variable because the destination
-          # variable is actually a pointer to the element type, not
-          # an array.  So, only propagate the name.
-          if (
-              insn.operation == bn.MediumLevelILOperation.MLIL_SET_VAR
-              and insn.src.operation == bn.MediumLevelILOperation.MLIL_ADDRESS_OF
-          ):
-            if insn.src.src == v:
-              use_insn: bn.MediumLevelILInstruction = insn
-              d: bn.Variable = use_insn.dest  # type: ignore
-              if d not in self._updated_set:
-                self._update_var_name(d, v.name)
-                queue.append(d)
-        continue
+          if isinstance(insn, bn.MediumLevelILSetVar):
+            if isinstance(insn.src, bn.MediumLevelILAddressOf):
+              if cv == insn.src.src:
+                assert(insn.dest.type)
+                dest_cv = self.declare_variable(insn.dest, name, insn.dest.type)
+                if dest_cv is not None:
+                  queue.append((dest_cv, (name, insn.dest.type)))
+      else:
+        v = bn.Variable(self._function, cv.source_type, cv.index, cv.storage)
+        for use_insn in self._function.mlil.get_var_uses(v):
+          if isinstance(use_insn, bn.MediumLevelILSetVar):
+            if isinstance(use_insn.src, bn.MediumLevelILVar):
+              dest_cv = self.declare_variable(use_insn.dest, name, ty)
+              if dest_cv is not None:
+                queue.append((dest_cv, (name, ty)))
 
-      for use_insn in self._function.mlil.get_var_uses(v):
-        if (
-            use_insn.operation == bn.MediumLevelILOperation.MLIL_SET_VAR
-            and use_insn.src.operation == bn.MediumLevelILOperation.MLIL_VAR  # type: ignore
-        ):
-          defined_var: bn.Variable = use_insn.dest  # type: ignore
-          if defined_var not in self._updated_set:
-            self._update_var_name_and_type(defined_var, v.type, v.name)
-            queue.append(defined_var)
+        for def_insn in self._function.mlil.get_var_definitions(v):
+          if isinstance(def_insn, bn.MediumLevelILSetVar):
+            if isinstance(def_insn.src, bn.MediumLevelILVar):
+              src_cv = self.declare_variable(def_insn.src.src, name, ty)
+              if src_cv is not None:
+                queue.append((src_cv, (name, ty)))
+            elif (
+              isinstance(def_insn.src, bn.MediumLevelILVarField)
+              and def_insn.src.src.source_type == bn.VariableSourceType.RegisterVariableSourceType
+            ):
+              src_type = def_insn.src.src.type
+              assert(src_type)
+              src_cv = self.declare_variable(def_insn.src.src, name, src_type)
+              if src_cv is not None:
+                queue.append((src_cv, (name, src_type)))
 
-      for def_insn in self._function.mlil.get_var_definitions(v):
-        if (
-            def_insn.operation == bn.MediumLevelILOperation.MLIL_SET_VAR
-            and (
-                def_insn.src.operation == bn.MediumLevelILOperation.MLIL_VAR
-                or (
-                    def_insn.src.operation == bn.MediumLevelILOperation.MLIL_VAR_FIELD
-                    and def_insn.src.src.source_type == bn.VariableSourceType.RegisterVariableSourceType
-                )
-            )
-        ):
-          used_var = def_insn.src.src
-          if used_var not in self._updated_set:
-            self._update_var_name_and_type(used_var, v.type, v.name)
-            queue.append(used_var)
+  def declare_variable(self, v: bn.Variable, name: str, ty: bn.Type):
+    cv = bn.CoreVariable(v._source_type, v.index, v.storage)
+    if cv not in self._local_variables:
+      if self._local_variables.declare_variable(cv, name, ty):
+        return cv
+    return None

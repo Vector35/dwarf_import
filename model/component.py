@@ -28,6 +28,12 @@ from .concrete_elements import Element, Function, Type, Variable
 from .attributes import AttributeSet
 
 
+class AnalysisRealm(Enum):
+  INTERNAL = 0
+  EXTERNAL = 1
+  RUNTIME = 2
+
+
 class Visibility(Enum):
   PUBLIC = 0
   PRIVATE = 1
@@ -55,6 +61,7 @@ class Component:
   name: str
   uuid: UUID = field(init=False, default_factory=uuid4)
   parent: Optional["Component"] = None
+  realm: AnalysisRealm = AnalysisRealm.INTERNAL
   selector: Selector = Selector.ELEMENT_SET
   operands: List[ComponentOperand] = field(default_factory=list)
   attributes: AttributeSet = field(default_factory=AttributeSet)
@@ -73,12 +80,32 @@ class Component:
 
   def __contains__(self, el: Element):
     assert(el is not None)
-    if self.selector == Selector.ELEMENT_SET:
+    if self.is_leaf():
       for opnd in self.operands:
         assert(isinstance(opnd, ComponentMember))
         if el == opnd.element:
           return True
     return False
+
+  def __repr__(self):
+    return f'<Component: {self.name}, {self.uuid=}>'
+
+  @property
+  def pathname(self) -> str:
+    tmp = []
+    p = self
+    while p is not None and p.parent is not None:
+      tmp.insert(0, p.name)
+      p = p.parent
+    return '/'.join(tmp)
+
+  def rename(self, value: str):
+    if value == self.name:
+      return
+    old_name = self.name
+    self.name = value
+    if self.model is not None:
+      self.model.notify('component_renamed', **{'component': self, 'old_name': old_name})
 
   def set_model(self, m):
     self.model = m
@@ -89,7 +116,7 @@ class Component:
 
   @property
   def component_count(self) -> int:
-    if self.selector == Selector.ELEMENT_SET:
+    if self.is_leaf():
       return 0
     else:
       return len(self.operands)
@@ -104,6 +131,8 @@ class Component:
         el = opnd.element
         if isinstance(el, Function):
           low = min(el.lowerbound, low)
+      else:
+        assert False, f'{type(opnd)} is an invalid component operand'
     return low
 
   @property
@@ -117,6 +146,12 @@ class Component:
         if isinstance(el, Function):
           high = max(el.upperbound, high)
     return high
+
+  def is_internal(self) -> bool:
+    return self.realm == AnalysisRealm.INTERNAL
+
+  def is_leaf(self) -> bool:
+    return self.selector == Selector.ELEMENT_SET
 
   def elements(self) -> Generator[Element, None, None]:
     for opnd in self.operands:
@@ -169,16 +204,30 @@ class Component:
     if self.selector != Selector.ELEMENT_SET:
       if isinstance(components, Component):
         components = [components]
+      pos = len(self.operands)
       for c in components:
         assert(c.uuid != self.uuid)
         c.parent = self
         c.set_model(self.model)
         self.operands.append(c)
+      if self.model and pos < len(self.operands):
+        self.model.notify('component_operands_added', **{'component': self, 'operands': list(self.operands[pos:])})
     else:
       raise Exception('Cannot add components to ELEMENT_SET')
 
   def add_elements(self, elements: Union[Element, Iterable[Element]]):
-    if self.selector == Selector.ELEMENT_SET:
+    if self.is_leaf():
       if isinstance(elements, Element):
         elements = [elements]
+      pos = len(self.operands)
       self.operands.extend(map(lambda el: ComponentMember(el), elements))
+      if self.model and pos < len(self.operands):
+        self.model.notify('component_operands_added', **{'component': self, 'operands': list(self.operands[pos:])})
+
+  def get_visibility(self, el: Element) -> Optional[Visibility]:
+    if self.is_leaf():
+      for opnd in self.operands:
+        assert(isinstance(opnd, ComponentMember))
+        if el == opnd.element:
+          return opnd.visibility
+    return None

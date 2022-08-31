@@ -36,20 +36,39 @@ class AnalysisModel(Observable):
   def __init__(self, name: str) -> None:
     super().__init__(None)
     self.name = name
+    self._elements: MutableMapping[UUID, Element] = dict()
     self._types: MutableMapping[QualifiedName, Type] = dict()
     self._constants: MutableMapping[QualifiedName, Constant] = dict()
     self._variables: MutableMapping[QualifiedName, Variable] = dict()
     self._functions: MutableMapping[int, Function] = dict()
     self._component = Component(self, 'Components', selector=Selector.UNION)
-    self._abstract_objects: MutableMapping[QualifiedName, AbstractObject] = dict()
+    self._abstract_objects: List[AbstractObject] = list()
     self._abstract_flows: MutableMapping[QualifiedName, AbstractFlow] = dict()
+    self._metadata = AttributeSet()
+
+  @property
+  def is_empty(self) -> bool:
+    if (
+      len(self._types) > 0
+      or len(self._constants) > 0
+      or len(self._variables) > 0
+      or len(self._functions) > 0
+      or self._component.component_count > 0
+    ):
+      return False
+    else:
+      return True
+
+  @property
+  def metadata(self):
+    return self._metadata
 
   def elements(self) -> Iterable[Union[Type, Constant, Variable, Function]]:
     return chain(
-        self._types.values(),
-        self._constants.values(),
-        self._variables.values(),
-        self._functions.values())
+      self._types.values(),
+      self._constants.values(),
+      self._variables.values(),
+      self._functions.values())
 
   @property
   def element_count(self) -> int:
@@ -57,8 +76,8 @@ class AnalysisModel(Observable):
 
   def abstract_elements(self) -> Iterable[Union[AbstractObject, AbstractFlow]]:
     return chain(
-        self._abstract_objects.values(),
-        self._abstract_flows.values()
+      self._abstract_objects,
+      self._abstract_flows.values()
     )
 
   @property
@@ -112,13 +131,10 @@ class AnalysisModel(Observable):
           yield (e, attr)
 
   def get_element_by_name(self, qname: QualifiedName) -> Optional[Element]:
-    pass
+    raise NotImplementedError('get_element_by_name')
 
   def get_element_by_uuid(self, uuid: UUID) -> Optional[Element]:
-    for el in self.elements():
-      if el.uuid == uuid:
-        return el
-    return None
+    return self._elements.get(uuid, None)
 
   def get_component_by_uuid(self, uuid: UUID) -> Optional[Component]:
     for c in self.iter_components():
@@ -143,19 +159,27 @@ class AnalysisModel(Observable):
   def add_variable(self, v: Variable):
     v.model = self
     self._variables[v.name] = v
+    self._elements[v.uuid] = v
+    self.notify('elements_added', **{'elements': [v]})
 
   def add_constant(self, c: Constant):
     c.model = self
     self._constants[c.name] = c
+    self._elements[c.uuid] = c
+    self.notify('elements_added', **{'elements': [c]})
 
   def add_function(self, f: Function):
     f.model = self
     if isinstance(f.entry_addr, int):
       self._functions[f.entry_addr] = f
+      self._elements[f.uuid] = f
+    self.notify('elements_added', **{'elements': [f]})
 
   def add_type(self, ty: Type):
     ty.model = self
     self._types[ty.name] = ty
+    self._elements[ty.uuid] = ty
+    self.notify('elements_added', **{'elements': [ty]})
 
   def get_components_containing(self, el: Element):
     for c in self.root_component.components():
@@ -231,11 +255,13 @@ class AnalysisModel(Observable):
 
   def add_abstract_object(self, obj: AbstractObject):
     obj.model = self
-    self._abstract_objects[obj.name] = obj
+    self._abstract_objects.append(obj)
+    self.notify('abstract_elements_added', **{'elements': [obj]})
 
   def add_abstract_flow(self, flow: AbstractFlow):
     flow.model = self
     self._abstract_flows[flow.name] = flow
+    self.notify('abstract_elements_added', **{'elements': [flow]})
 
   def select_elements(self, attr_name, attr_value: Any = None) -> Generator[Union[Element, Component], None, None]:
     for el in self.elements():
@@ -259,8 +285,8 @@ class AnalysisModel(Observable):
 
     def ELF_has_debug_info(elf_file: ELFFile) -> bool:
       return (
-          elf_file.get_section_by_name('.debug_info') is not None
-          or elf_file.get_section_by_name('.zdebug_info') is not None
+        elf_file.get_section_by_name('.debug_info') is not None
+        or elf_file.get_section_by_name('.zdebug_info') is not None
       )
 
     elf_file = ELFFile(open(filename, 'rb'))

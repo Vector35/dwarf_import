@@ -69,6 +69,10 @@ class AbstractElement(object):
       self.attributes = AttributeSet()
     self.attributes[key] = value
 
+  def unset_attribute(self, key):
+    if self.attributes is not None:
+      del self.attributes[key]
+
   def append_attribute(self, key, value) -> None:
     if self.attributes is None:
       self.attributes = AttributeSet()
@@ -104,17 +108,28 @@ ABSTRACT_TYPE_LINKED = AbstractType('LinkedDataStructure')
 
 class AbstractObject(AbstractElement):
   def __init__(
-      self,
-      name: QualifiedName,
-      abstract_type: AbstractType,
-      concrete_element: Optional[Element],
-      addr: Optional[int] = None
+    self,
+    name: QualifiedName,
+    abstract_type: AbstractType,
+    concrete_element: Optional[Element],
+    concrete_allocator: Optional[Element],
+    addr: Optional[int] = None
   ):
     super().__init__(name=name)
     self.abstract_type = abstract_type
     self.concrete_element = concrete_element
+    self.concrete_allocator = concrete_allocator
     self.addr = addr
     self.context: List[Tuple[Element, Union["AbstractObject", int, str]]] = list()
+
+  def inherit_properties(self, objects: List["AbstractObject"]):
+    for attrs in filter(None, map(lambda x: x.attributes, objects)):
+      for name, value in attrs.items():
+        if not self.has_attribute(name):
+          self.set_attribute(name, value)
+        else:
+          if self.get_attribute(name) != value:
+            self.unset_attribute(name)
 
 
 class AbstractFlow(AbstractElement):

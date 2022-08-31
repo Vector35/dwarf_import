@@ -72,7 +72,7 @@ def load_symbols_from_file(bv):
   file_choice = OpenFileNameField("Debug file")
   get_form_input([file_choice], "Open debug file")
 
-  if not file_choice.result or os.path.exists(file_choice.result):
+  if not file_choice.result or not os.path.exists(file_choice.result):
     log_error(f"Input file `{file_choice.result}` does not exist")
     return
 

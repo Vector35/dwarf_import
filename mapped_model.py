@@ -18,7 +18,7 @@
 # FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
 # IN THE SOFTWARE.
 
-from typing import Any, Optional, Mapping, List
+from typing import Optional
 import os
 from binaryninja import BinaryView, BinaryViewType
 from .model.analysis_model import AnalysisModel
@@ -27,12 +27,12 @@ from .mapping import BinjaMap
 
 class AnalysisSession(object):
   def __init__(
-      self,
-      filename: Optional[str] = None,
-      debug_root: Optional[str] = None,
-      debug_file: Optional[str] = None,
-      binary_view: Optional[BinaryView] = None,
-      logger=None
+    self,
+    filename: Optional[str] = None,
+    debug_root: Optional[str] = None,
+    debug_file: Optional[str] = None,
+    binary_view: Optional[BinaryView] = None,
+    logger=None
   ):
     if filename is None and binary_view is None:
       raise ValueError('Must specify either a filename or binary view.')
@@ -43,7 +43,9 @@ class AnalysisSession(object):
     self.debug_file = debug_file
 
     if binary_view is None:
-      bv = BinaryViewType.get_view_of_file(filename, update_analysis=True)
+      if filename is None:
+        raise ValueError('A filename must be specified when binary_view is None.')
+      bv = BinaryViewType.get_view_of_file(filename, update_analysis=False)
       if bv is None:
         raise Exception(f'Unable to get binary view for file: {filename}')
       self.binary_view = bv
@@ -65,10 +67,18 @@ class AnalysisSession(object):
     m = AnalysisModel.from_dwarf(debug_source, self.debug_root, name=binary_name, logger=logger)
     self.model = m if m else AnalysisModel(binary_name)
 
+    assert(self.binary_view.arch)
+    self.arch = self.binary_view.arch
+    assert(self.binary_view.platform)
+    self.platform = self.binary_view.platform
     self.mapping = BinjaMap(self.binary_view)
 
   def __del__(self):
     if hasattr(self, 'binary_view') and self.binary_view is not None:
       self.binary_view.abort_analysis()
-      self.binary_view.file.close()
+      self.binary_view.file.close()  # type: ignore
       del self.binary_view
+
+  # @property
+  # def name(self) -> str:
+  #   return os.path.basename(self.binary_view.file.original_filename)

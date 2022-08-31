@@ -196,16 +196,38 @@ _REG_NAMES_AArch64 = [
     'z24', 'z25', 'z26', 'z27', 'z28', 'z29', 'z30', 'z31'
 ]
 
+_REG_NAMES_x64 = [
+    'rax', 'rdx', 'rcx', 'rbx', 'rsi', 'rdi', 'rbp', 'rsp',
+    'r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15',
+    'rip', 'xmm0', 'xmm1', 'xmm2', 'xmm3', 'xmm4', 'xmm5', 'xmm6',
+    'xmm7', 'xmm8', 'xmm9', 'xmm10', 'xmm11', 'xmm12', 'xmm13', 'xmm14',
+    'xmm15', 'st0', 'st1', 'st2', 'st3', 'st4', 'st5', 'st6',
+    'st7', 'mm0', 'mm1', 'mm2', 'mm3', 'mm4', 'mm5', 'mm6',
+    'mm7', 'rflags', 'es', 'cs', 'ss', 'ds', 'fs', 'gs',
+    '<none>', '<none>',
+    'fs.base', 'gs.base',
+    '<none>', '<none>',
+    'tr',
+    'ldtr',
+    'mxcsr',
+    'fcw',
+    'fsw',
+    'xmm16', 'xmm17', 'xmm18', 'xmm19', 'xmm20', 'xmm21', 'xmm22', 'xmm23', 'xmm24', 'xmm25', 'xmm26', 'xmm27', 'xmm28', 'xmm29', 'xmm30', 'xmm31',
+]
+
 
 def describe_reg_name(regnum, machine_arch=None, default=True):
-  assert machine_arch in ['AArch64', 'ARM', 'x86', 'x64', 'MIPS', 'PowerPC'], 'unrecognized: %s' % machine_arch
+    assert machine_arch in ['AArch64', 'ARM', 'x86', 'x64', 'MIPS', 'PowerPC'], 'unrecognized: %s' % machine_arch
 
-  if machine_arch == 'ARM':
-    return _REG_NAMES_ARM[regnum]
-  if machine_arch == 'MIPS':
-    return _REG_NAMES_MIPS[regnum]
-  if machine_arch == 'PowerPC':
-    return _REG_NAMES_POWERPC[regnum]
-  if machine_arch == 'AArch64':
-    return _REG_NAMES_AArch64[regnum]
-  return elftools_describe_reg_name(regnum, machine_arch, default)
+    if machine_arch == 'x64':
+        return _REG_NAMES_x64[regnum]
+    if machine_arch == 'ARM':
+        return _REG_NAMES_ARM[regnum]
+    if machine_arch == 'MIPS':
+        return _REG_NAMES_MIPS[regnum]
+    if machine_arch == 'PowerPC':
+        return _REG_NAMES_POWERPC[regnum]
+    if machine_arch == 'AArch64':
+        return _REG_NAMES_AArch64[regnum]
+    return elftools_describe_reg_name(regnum, machine_arch, default)
+  

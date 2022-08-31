@@ -1,4 +1,4 @@
-# Copyright(c) 2020-2022 Vector 35 Inc
+# Copyright(c) 2021-2022 Vector 35 Inc
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files(the "Software"), to
@@ -18,26 +18,24 @@
 # FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
 # IN THE SOFTWARE.
 
-
 from typing import List
+from enum import Enum
+from .attributes import Attribute
+from .concrete_elements import Element
 
 
-class Observer(object):
-  pass
+class ResourceType(Enum):
+  HEAP_MEMORY = 0
+  FILE_OBJECT = 1
+  FILE_HANDLE = 2
+  NETWORK_SOCKET = 3
 
 
-class Observable(object):
-  def __init__(self, parent):
-    self._observable_parent = parent
-    self._observers: List[Observer] = list()
-
-  def add_observer(self, observer):
-    self._observers.append(observer)
-
-  def notify(self, event_name, **kwargs):
-    for observer in self._observers:
-      method = getattr(observer, f'on_{event_name}', None)
-      if method:
-        method(**kwargs)
-    if self._observable_parent:
-      self._observable_parent.notify(event_name, **kwargs)
+class ResourceSchema(object):
+  acquires = Attribute('acquires', ResourceType)
+  releases = Attribute('releases', ResourceType)
+  escapes = Attribute('escapes', bool)
+  released_at = Attribute('released_at', List[Element])
+  acquired_at = Attribute('acquired_at', List[Element])
+  imported = Attribute('imported', bool)
+  objects = Attribute('objects', List[Element])

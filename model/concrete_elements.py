@@ -55,7 +55,10 @@ class Element(object):
   def name(self, value: QualifiedName):
     if value == self._name:
       return
+    old_name = self._name
     self._name = value
+    if self.model is not None:
+      self.model.notify('element_renamed', **{'element': self, 'old_name': old_name})
 
   def has_attribute(self, key):
     if self.attributes is not None:
@@ -78,6 +81,9 @@ class Element(object):
     if self.attributes is None:
       self.attributes = AttributeSet()
     self.attributes.append(key, value)
+
+  def get_child_by_uuid(self, uuid: UUID) -> Optional["Element"]:
+    return None
 
 
 class Type(Element):
@@ -207,9 +213,9 @@ class PointerType(Type):
       return False
     assert(isinstance(ty, PointerType))
     return (
-        self.byte_size == ty.byte_size
-        and self.nullable == ty.nullable
-        and self.target_type.is_equivalent(ty.target_type)
+      self.byte_size == ty.byte_size
+      and self.nullable == ty.nullable
+      and self.target_type.is_equivalent(ty.target_type)
     )
 
   def has_ancestor_class(self, typeclass) -> bool:
@@ -245,10 +251,7 @@ class ConstType(Type):
     if type(self) != type(ty):
       return False
     assert(isinstance(ty, ConstType))
-    return (
-        self.byte_size == ty.byte_size and
-        self.type.is_equivalent(ty.type)
-    )
+    return (self.byte_size == ty.byte_size and self.type.is_equivalent(ty.type))
 
   def strip_modifiers(self) -> Type:
     return self.type.strip_modifiers()
@@ -275,10 +278,7 @@ class VolatileType(Type):
     if type(self) != type(ty):
       return False
     assert(isinstance(ty, VolatileType))
-    return (
-        self.byte_size == ty.byte_size and
-        self.type.is_equivalent(ty.type)
-    )
+    return (self.byte_size == ty.byte_size and self.type.is_equivalent(ty.type))
 
   def strip_modifiers(self) -> Type:
     return self.type.strip_modifiers()
@@ -306,9 +306,9 @@ class ArrayType(Type):
       return False
     assert(isinstance(ty, ArrayType))
     return (
-        self.byte_size == ty.byte_size and
-        self.count == ty.count and
-        self.element_type.is_equivalent(ty.element_type)
+      self.byte_size == ty.byte_size
+      and self.count == ty.count
+      and self.element_type.is_equivalent(ty.element_type)
     )
 
 
@@ -323,9 +323,9 @@ class StringType(Type):
       return False
     assert(isinstance(ty, StringType))
     return (
-        self.byte_size == ty.byte_size and
-        self.char_size == ty.char_size and
-        self.is_null_terminated == ty.is_null_terminated
+      self.byte_size == ty.byte_size
+      and self.char_size == ty.char_size
+      and self.is_null_terminated == ty.is_null_terminated
     )
 
 
@@ -400,8 +400,9 @@ class MemberFunction(Member):
 
 
 class Field(Element):
-  def __init__(self, name: Optional[str], offset: int, type: Type):
+  def __init__(self, name: Optional[str], offset: int, type: Type, composite: Optional[Element] = None):
     super().__init__(name=QualifiedName(name) if name else QualifiedName())
+    self.owner = composite
     self.offset = offset
     self.type = type
 
@@ -412,10 +413,17 @@ class Field(Element):
     else:
       return self.name[-1]
 
+  @local_name.setter
+  def local_name(self, n: str):
+    old_name = self.name
+    self.name = self.name.parent.concat(n)
+    if self.owner is not None and self.owner.model:
+      self.owner.model.notify('element_renamed', **{'element': self, 'old_name': old_name})
+
   @property
   def size(self) -> Optional[int]:
     # if self.type.byte_size is None:
-    #     raise Exception('Field has no size')
+    #   raise Exception('Field has no size')
     return self.type.byte_size
 
   @property
@@ -495,7 +503,7 @@ class CompositeType(Type):
     member_functions = (f.__repr__() for f in self.functions())
     member_fields = (f.__repr__() for f in sorted(self.fields(), key=lambda mf: mf.field.offset))
     decls = ';\n'.join(chain(member_types, member_constants, member_functions, member_fields, ''))
-    body = '\n    ' + decls.replace('\n', '\n    ') + ';' if decls else ''
+    body = '\n  ' + decls.replace('\n', '\n  ') + ';' if decls else ''
     return f'{self.policy.name} {str(self.name)}\n{{{body}\n}}'
 
   def __str__(self) -> str:
@@ -516,10 +524,26 @@ class CompositeType(Type):
   def fields(self) -> Iterable[MemberField]:
     return filter(lambda m: isinstance(m, MemberField), self.members)  # type: ignore
 
+  def get_child_by_uuid(self, uuid: UUID) -> Optional[Element]:
+    for member in self.fields():
+      if member.field.uuid == uuid:
+        return member.field
+      # TODO: recurse into anonymous composites
+    return None
+
+  @property
+  def field_count(self) -> int:
+    c = 0
+    for m in filter(lambda m: isinstance(m, MemberField), self.members):
+      c += 1
+    return c
+
   def add_field(self, field: Field):
+    field.owner = self
     self.policy.add_field(self, field)
 
   def add_unnamed_field(self, field: Field):
+    field.owner = self
     self.policy.add_unnamed_field(self, field)
 
   def add_constant(self, local_name: str, c: Constant):
@@ -530,7 +554,7 @@ class CompositeType(Type):
     fn.name = self.name.concat(fn.name[-1])
     self.members.append(MemberFunction(self.policy.default_access, perms, fn))
 
-  def update(self, rhs: "CompositeType") -> bool:
+  def merge_from(self, rhs: "CompositeType") -> bool:
     if self.policy != rhs.policy:
       return False
     for m in rhs.members:
@@ -561,8 +585,8 @@ class CompositeType(Type):
       if isinstance(m, MemberFunction):
         assert(isinstance(existing_member, MemberFunction))
         if (
-            m.function.name == existing_member.function.name and
-            m.read_only == existing_member.read_only
+          m.function.name == existing_member.function.name
+          and m.read_only == existing_member.read_only
         ):
           return True
       elif isinstance(m, MemberConstant):
@@ -571,10 +595,11 @@ class CompositeType(Type):
       elif isinstance(m, MemberField):
         assert(isinstance(existing_member, MemberField))
         if (
-            m.field.name == existing_member.field.name and
-            m.field.type.is_equivalent(existing_member.field.type)
+          m.field.offset == existing_member.field.offset
+          and m.field.local_name == existing_member.field.local_name
         ):
-          return True
+          if m.field.type.is_equivalent(existing_member.field.type):
+            return True
       elif isinstance(m, MemberType):
         assert(isinstance(existing_member, MemberType))
         raise NotImplementedError
@@ -584,12 +609,15 @@ class CompositeType(Type):
   def is_equivalent(self, ty: "Type") -> bool:
     if type(self) != type(ty):
       return False
-    assert(isinstance(ty, CompositeType))
-    return (
-        self.byte_size == ty.byte_size and
-        self.policy.name == ty.policy.name and
-        self.name == ty.name
-    )
+    assert isinstance(ty, CompositeType)
+    if self.name != ty.name or self.policy.name != ty.policy.name:
+      return False
+    if self.byte_size == ty.byte_size and self.field_count == ty.field_count:
+      for lhs, rhs in zip(self.fields(), ty.fields()):
+        if lhs.field.local_name != rhs.field.local_name:
+          return False
+      return True
+    return False
 
 
 class ClassType(CompositeType):
@@ -638,7 +666,7 @@ class EnumType(Type):
 
   def __repr__(self):
     items = ';\n'.join((e.__repr__() for e in self.enumerators))
-    body = '\n    ' + items.replace('\n', '\n    ') + ';' if items else ''
+    body = '\n  ' + items.replace('\n', '\n  ') + ';' if items else ''
     return f'enum {str(self.name)}\n{{{body}\n}}'
 
   def __str__(self) -> str:
@@ -651,10 +679,7 @@ class EnumType(Type):
     if type(self) != type(ty):
       return False
     assert(isinstance(ty, EnumType))
-    return (
-        self.byte_size == ty.byte_size and
-        self.enumerators == ty.enumerators
-    )
+    return (self.byte_size == ty.byte_size and self.enumerators == ty.enumerators)
 
 
 class FunctionType(Type):
@@ -677,10 +702,7 @@ class FunctionType(Type):
     for pi, qi in zip(self.parameters, ty.parameters):
       if not pi.is_equivalent(qi):
         return False
-    return (
-        self.byte_size == ty.byte_size and
-        self.return_type.is_equivalent(ty.return_type)
-    )
+    return (self.byte_size == ty.byte_size and self.return_type.is_equivalent(ty.return_type))
 
 
 class PointerToMemberType(Type):
@@ -847,6 +869,7 @@ class Function(Element):
     self.has_definition: bool = True
     self.is_inlined: bool = False
     self.ranges: Optional[List[Tuple[int, int]]] = None
+    self.arch: Optional[str] = None
 
   def __repr__(self) -> str:
     if self._return_value is None:
@@ -922,3 +945,8 @@ class Function(Element):
     if self.variables is not None:
       for v in self.variables:
         yield v
+
+  def iter_inlined_function_tree(self):
+    for child in self.inlined_functions or []:
+      yield child
+      yield from child.iter_inlined_function_tree()

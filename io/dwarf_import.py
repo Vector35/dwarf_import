@@ -29,7 +29,7 @@ from enum import Enum, auto
 from collections import defaultdict
 from itertools import tee
 from typing import MutableMapping, Iterator, List, Set, Optional, Union, Tuple, Any, ValuesView
-from elftools.elf.elffile import ELFFile
+from elftools.elf.elffile import ELFFile, SymbolTableSection
 from elftools.dwarf.compileunit import CompileUnit
 from .dwarf_expr import LocExprParser
 from elftools.dwarf.die import AttributeValue, DIE
@@ -37,18 +37,18 @@ from elftools.dwarf.locationlists import LocationEntry, BaseAddressEntry
 from ..model import QualifiedName, Component, AnalysisModel
 from ..model.locations import ExprOp, Location, LocationType
 from ..model.concrete_elements import (
-    Element,
-    Type,
-    Constant,
-    Variable,
-    Function,
-    BaseType, AliasType, ArrayType, PointerType,
-    CompositeType, ConstType, VolatileType, StructType, ClassType, UnionType,
-    EnumType, Enumerator, FunctionType, StringType, PointerToMemberType,
-    LocalVariable,
-    Parameter,
-    Field,
-    VOID, VOID_PTR, VARIADIC
+  Element,
+  Type,
+  Constant,
+  Variable,
+  Function,
+  BaseType, AliasType, ArrayType, PointerType,
+  CompositeType, ConstType, VolatileType, StructType, ClassType, UnionType,
+  EnumType, Enumerator, FunctionType, StringType, PointerToMemberType,
+  LocalVariable,
+  Parameter,
+  Field,
+  VOID, VOID_PTR, VARIADIC
 )
 
 
@@ -108,24 +108,24 @@ def partition(items, predicate=bool):
 
 
 CONCRETE_SUBPROGRAM_ATTRIBUTES = set([
-    'DW_AT_low_pc',
-    'DW_AT_high_pc',
-    'DW_AT_ranges',
-    'DW_AT_entry_pc',
-    'DW_AT_location',
-    'DW_AT_return_addr',
-    'DW_AT_start_scope',
-    'DW_AT_segment'
+  'DW_AT_low_pc',
+  'DW_AT_high_pc',
+  'DW_AT_ranges',
+  'DW_AT_entry_pc',
+  'DW_AT_location',
+  'DW_AT_return_addr',
+  'DW_AT_start_scope',
+  'DW_AT_segment'
 ])
 
 TYPE_TAGS = set([
-    'DW_TAG_array_type',
-    'DW_TAG_base_type',
-    'DW_TAG_const_type',
-    'DW_TAG_pointer_type',
-    'DW_TAG_structure_type',
-    'DW_TAG_typedef',
-    'DW_TAG_union_type'
+  'DW_TAG_array_type',
+  'DW_TAG_base_type',
+  'DW_TAG_const_type',
+  'DW_TAG_pointer_type',
+  'DW_TAG_structure_type',
+  'DW_TAG_typedef',
+  'DW_TAG_union_type'
 ])
 
 
@@ -178,7 +178,7 @@ class DWARFData(object):
     self._die_map = dict()
     self._line_programs = dict()
     self._debug_str = None
-    self._logger = logging.getLogger('DWARFData')
+    self._logger = logging.getLogger('sidekick.DWARFData')
     self._index()
 
   def _index(self):
@@ -247,18 +247,18 @@ class DWARFData(object):
 
 class DWARFDB(object):
   REFERENCE_FORMS = {
-      'DW_FORM_ref1',
-      'DW_FORM_ref2',
-      'DW_FORM_ref4',
-      'DW_FORM_ref8',
-      'DW_FORM_ref_addr',
-      'DW_FORM_ref_sig8',
-      'DW_FORM_ref_sup4',
-      'DW_FORM_ref_sup8'
+    'DW_FORM_ref1',
+    'DW_FORM_ref2',
+    'DW_FORM_ref4',
+    'DW_FORM_ref8',
+    'DW_FORM_ref_addr',
+    'DW_FORM_ref_sig8',
+    'DW_FORM_ref_sup4',
+    'DW_FORM_ref_sup8'
   }
 
   def __init__(self, elf_file: ELFFile, debug_root: Optional[str] = None):
-    self._logger = logging.getLogger('DWARFDB')
+    self._logger = logging.getLogger('sidekick.DWARFDB')
     self._base_addresses = dict()
     self._pri = DWARFData(elf_file, debug_root)
     self._sup = None
@@ -283,8 +283,6 @@ class DWARFDB(object):
     return self._external_decl_files[name]
 
   def _index_dwarf_data(self):
-    # Iterate over the partial compilation units to get the
-    # declaration files for the subprograms.
     for top_die in self._pri.iter_partial_units():
       for die in top_die.iter_children():
         if die.tag == 'DW_TAG_subprogram':
@@ -293,8 +291,6 @@ class DWARFDB(object):
             self.set_external_decl_file(name, self.get_decl_file(die))
 
   def process_imported_units(self, unit_die: DIE):
-    """Include nested partial units.
-    """
     self._logger.debug(f'Importing unit at {unit_die.cu.cu_offset}')
     for child in unit_die.iter_children():
       if child.tag == 'DW_TAG_imported_unit':
@@ -381,13 +377,13 @@ class DWARFDB(object):
 
   def get_qualified_name(self, die: DIE) -> QualifiedName:
     if (
-        die._parent is not None
-        and die._parent.tag in {
-            'DW_TAG_structure_type',
-            'DW_TAG_class_type',
-            'DW_TAG_interface_type',
-            'DW_TAG_union_type',
-            'DW_TAG_namespace'}
+      die._parent is not None
+      and die._parent.tag in {
+        'DW_TAG_structure_type',
+        'DW_TAG_class_type',
+        'DW_TAG_interface_type',
+        'DW_TAG_union_type',
+        'DW_TAG_namespace'}
     ):
       qname = self.get_qualified_name(die._parent)
       uname = self.get_name(die)
@@ -485,9 +481,9 @@ class DWARFDB(object):
 
   def is_subprogram_declared_external(self, die):
     return (
-        'DW_AT_external' in die.attributes
-        and 'DW_AT_declaration' in die.attributes
-        and 'DW_AT_decl_file' in die.attributes
+      'DW_AT_external' in die.attributes
+      and 'DW_AT_declaration' in die.attributes
+      and 'DW_AT_decl_file' in die.attributes
     )
 
   def is_concrete_variable(self, die):
@@ -528,11 +524,11 @@ class DWARFDB(object):
             else:
               base = 0
           locations.append(
-              LocationEntry(
-                  entry_offset=entry.entry_offset,
-                  begin_offset=base + entry.begin_offset,
-                  end_offset=base + entry.end_offset,
-                  loc_expr=entry.loc_expr))
+            LocationEntry(
+              entry_offset=entry.entry_offset,
+              begin_offset=base + entry.begin_offset,
+              end_offset=base + entry.end_offset,
+              loc_expr=entry.loc_expr))
         elif isinstance(entry, BaseAddressEntry):
           b: int = entry.base_address
           base = b
@@ -548,18 +544,18 @@ class DWARFDB(object):
         if isinstance(entry, LocationEntry):
           if base is None:
             locations.append(
-                LocationEntry(
-                    entry_offset=entry.entry_offset,
-                    begin_offset=entry.begin_offset,
-                    end_offset=entry.end_offset,
-                    loc_expr=entry.loc_expr))
+              LocationEntry(
+                entry_offset=entry.entry_offset,
+                begin_offset=entry.begin_offset,
+                end_offset=entry.end_offset,
+                loc_expr=entry.loc_expr))
           else:
             locations.append(
-                LocationEntry(
-                    entry_offset=entry.entry_offset,
-                    begin_offset=base + entry.begin_offset,
-                    end_offset=base + entry.end_offset,
-                    loc_expr=entry.loc_expr))
+              LocationEntry(
+                entry_offset=entry.entry_offset,
+                begin_offset=base + entry.begin_offset,
+                end_offset=base + entry.end_offset,
+                loc_expr=entry.loc_expr))
         elif isinstance(entry, BaseAddressEntry):
           base = entry.base_address
         else:
@@ -577,7 +573,9 @@ class DWARFDB(object):
   def get_cu_base_address(self, cu: CompileUnit) -> Optional[int]:
     base = self._base_addresses.get(cu, None)
     if base is None:
-      base = self._base_addresses.setdefault(cu, self.get_start_address(cu.get_top_DIE()))
+      top_die = cu.get_top_DIE()
+      assert top_die.tag == 'DW_TAG_compile_unit'
+      base = self._base_addresses.setdefault(cu, self.get_start_address(top_die))
     return base
 
   def get_array_count(self, die: DIE) -> Optional[int]:
@@ -596,7 +594,7 @@ class DWARFDB(object):
             lb = d.attributes['DW_AT_lower_bound'].value
             return ub - lb
           assert(isinstance(ub, int))
-          return ub + 1  # TODO: assuming zero-based, but need to know for sure
+          return ub + 1
     return None
 
 
@@ -610,10 +608,10 @@ def split_all_path_parts(path: str):
   path = os.path.normpath(path)
   while 1:
     parts = os.path.split(path)
-    if parts[0] == path:  # sentinel for absolute paths
+    if parts[0] == path:
       allparts.insert(0, parts[0])
       break
-    elif parts[1] == path:  # sentinel for relative paths
+    elif parts[1] == path:
       allparts.insert(0, parts[1])
       break
     else:
@@ -642,14 +640,12 @@ class DWARFImporter(object):
     self._include_subprogram_decls = query.get('include_subprogram_decls', True)
     self._compile_unit_filter = query.get('cu_filter', None)
     self._die_map = dict()
-    # self._line_programs = dict()
-    # self._imported_types: Mapping[DIE, Type] = dict()
     self._imported_subprograms: MutableMapping[str, Set[str]] = defaultdict(set)
     self._imported_start_addrs: Set[int] = set()
     if logger is not None:
       self._logger = logger.getChild('DWARFImporter')
     else:
-      self._logger = logging.getLogger('DWARFImporter')
+      self._logger = logging.getLogger('sidekick.DWARFImporter')
     self._component: Optional[Component] = None
 
   def import_debug_info(self):
@@ -661,7 +657,8 @@ class DWARFImporter(object):
         name = 'anonymous'
       qname = QualifiedName(*split_all_path_parts(name))
       language = self._dwarf_db.get_attr_as_int(cu_die, 'DW_AT_language')
-      language = Language(language).name
+      if language is not None:
+        language = Language(language).name
       producer = self._dwarf_db.get_attr_as_string(cu_die, 'DW_AT_producer')
 
       self._component = self._model.make_leaf_component(qname)
@@ -678,9 +675,10 @@ class DWARFImporter(object):
       self._model.add_type(ty)
 
   def import_compilation_unit(self, die: DIE):
-    cu_name = self._dwarf_db.get_name(die)
-    self._logger.debug('--' + (cu_name.ljust(78, '-') if cu_name else ''))
-    self._base_address = self._dwarf_db.get_start_address(die)
+    if die.tag == 'DW_TAG_compile_unit':
+      cu_name = self._dwarf_db.get_name(die)
+      self._logger.debug('--' + (cu_name.ljust(78, '-') if cu_name else ''))
+      self._base_address = self._dwarf_db.get_start_address(die)
     for child in die.iter_children():
       if child.tag == 'DW_TAG_subprogram':
         if self._include_subprograms:
@@ -695,54 +693,54 @@ class DWARFImporter(object):
         if self._include_imports:
           self.import_imported_declaration(child)
       elif child.tag in [
-          'DW_TAG_namespace',
-          'DW_TAG_class_type',
-          'DW_TAG_interface_type',
-          'DW_TAG_structure_type',
-          'DW_TAG_union_type'
+        'DW_TAG_namespace',
+        'DW_TAG_class_type',
+        'DW_TAG_interface_type',
+        'DW_TAG_structure_type',
+        'DW_TAG_union_type'
       ]:
         self.import_compilation_unit(child)
       elif child.tag == 'DW_TAG_module' and 'DW_AT_declaration' in child.attributes:
         pass
       elif child.tag in [
-          'DW_TAG_imported_unit',
-          'DW_TAG_typedef',
-          'DW_TAG_unspecified_type',
-          'DW_TAG_base_type',
-          'DW_TAG_const_type',
-          'DW_TAG_volatile_type',
-          'DW_TAG_restrict_type',
-          'DW_TAG_array_type',
-          'DW_TAG_enumeration_type',
-          'DW_TAG_pointer_type',
-          'DW_TAG_reference_type',
-          'DW_TAG_ptr_to_member_type',
-          'DW_TAG_subroutine_type',
-          'DW_TAG_rvalue_reference_type',
-          'DW_TAG_subrange_type',
-          'DW_TAG_string_type',
-          'DW_TAG_member',
-          'DW_TAG_inheritance',
-          'DW_TAG_template_type_param',
-          'DW_TAG_template_value_param',
-          'DW_TAG_GNU_template_template_param',
-          'DW_TAG_GNU_template_parameter_pack',
-          'DW_TAG_imported_module',
-          'DW_TAG_module',
-          'DW_TAG_imported_declaration',
-          'DW_TAG_dwarf_procedure',
-          'DW_TAG_constant'
+        'DW_TAG_imported_unit',
+        'DW_TAG_typedef',
+        'DW_TAG_unspecified_type',
+        'DW_TAG_base_type',
+        'DW_TAG_const_type',
+        'DW_TAG_volatile_type',
+        'DW_TAG_restrict_type',
+        'DW_TAG_array_type',
+        'DW_TAG_enumeration_type',
+        'DW_TAG_pointer_type',
+        'DW_TAG_reference_type',
+        'DW_TAG_ptr_to_member_type',
+        'DW_TAG_subroutine_type',
+        'DW_TAG_rvalue_reference_type',
+        'DW_TAG_subrange_type',
+        'DW_TAG_string_type',
+        'DW_TAG_member',
+        'DW_TAG_inheritance',
+        'DW_TAG_template_type_param',
+        'DW_TAG_template_value_param',
+        'DW_TAG_GNU_template_template_param',
+        'DW_TAG_GNU_template_parameter_pack',
+        'DW_TAG_imported_module',
+        'DW_TAG_module',
+        'DW_TAG_imported_declaration',
+        'DW_TAG_dwarf_procedure',
+        'DW_TAG_constant'
       ]:
         pass
       else:
         print(child.tag, '(child tag)')
 
   def is_global_variable(self, die: DIE) -> bool:
-    attr = self._dwarf_db.get_attribute(die, 'DW_AT_declaration')
+    attr = self._dwarf_db.get_attribute(die, 'DW_AT_declaration', False)
     if attr is not None:
       return False
     locations = self._dwarf_db.get_location_list(die)
-    return len(locations) == 0
+    return len(locations) != 0
 
   def is_global_constant(self, die: DIE) -> bool:
     if 'DW_AT_declaration' in die.attributes:
@@ -779,6 +777,7 @@ class DWARFImporter(object):
     elif address >= self._min_section_addr:
       v = Variable(name=qname, addr=address, type=var_type)
     else:
+      self._logger.debug(f'Variable address is greater than the minimum section address ({self._min_section_addr:x})')
       return
 
     self._model.add_variable(v)
@@ -840,7 +839,7 @@ class DWARFImporter(object):
     else:
       return_type = self._type_factory.make_user_type(return_type_die)
     function.set_return_type(return_type)
-    function.no_return = True if self._dwarf_db.get_attribute(die, 135) else False  # type: ignore
+    function.no_return = True if self._dwarf_db.get_attribute(die, 'DW_AT_noreturn') else False
     function.frame_base = self.import_location_list(self._dwarf_db.get_attr_as_location_list(die, 'DW_AT_frame_base'))
     function.ranges = self._dwarf_db.get_ranges(die)
     if self._include_subprogram_decls:
@@ -848,6 +847,7 @@ class DWARFImporter(object):
         decl_file = self._dwarf_db.get_external_decl_file(str(qname))
         if decl_file is not None:
           function.set_attribute('decl_file', decl_file)
+    function.arch = self.get_function_arch(function)
     location_map = defaultdict(list)
     abstract_map = dict()
     self.import_local_elements(die, function, None, location_map=location_map, abstract_map=abstract_map)
@@ -858,8 +858,22 @@ class DWARFImporter(object):
     self._component.add_elements(function)
     self._component.add_elements(global_vars)
 
+  def get_function_arch(self, function: Function):
+    arch = self._dwarf_db._pri._arch
+    if arch == 'ARM':
+      for section in self._dwarf_db._pri._elf_file.iter_sections():
+        if not isinstance(section, SymbolTableSection):
+          continue
+        for symbol in section.iter_symbols():
+          if symbol.entry['st_info']['type'] != 'STT_FUNC':
+            continue
+          addr = symbol.entry['st_value']
+          if ((addr & ~0x1) != function.entry_addr):
+            continue
+          return 'Thumb' if (addr & 0x1) else 'ARM'
+    return arch
+
   def extract_global_variables(self, function: Function):
-    """Extract function variables with global storage (e.g., static) """
     global_vars = []
     for v in function.iter_variables():
       global_locations = list(loc for loc in v.locations if loc.type == LocationType.STATIC_GLOBAL)
@@ -871,12 +885,8 @@ class DWARFImporter(object):
     return global_vars
 
   def apply_variable_hiding(self, location_map):
-    """
-        param < variable < inlined param < inlined variable
-    """
     for loc, elements in location_map.items():
       if len(elements) > 1:
-        # Find the most recent element whose type differs from a preceding element.
         j = None
         for i in range(len(elements) - 1, 0, -1):
           if elements[i].type != elements[i - 1].type:
@@ -884,10 +894,8 @@ class DWARFImporter(object):
             break
         if j is None:
           continue
-        # Find the next non-artificial element.
         while j < len(elements) - 1 and elements[j].name in ['this', '__artificial__']:
           j += 1
-        # Remove the location from the prior elements.
         for i in range(0, j):
           elements[i].locations.remove(loc)
 
@@ -907,32 +915,12 @@ class DWARFImporter(object):
     return function
 
   def import_local_elements(
-      self,
-      die: DIE, function: Function,
-      parent_function: Optional[Function],
-      inside_lexical_block: bool = False,
-      location_map=None, abstract_map=None
+    self,
+    die: DIE, function: Function,
+    parent_function: Optional[Function],
+    inside_lexical_block: bool = False,
+    location_map=None, abstract_map=None
   ):
-    """Imports function elements.
-
-    Notes
-    -----
-    Local variables can share locations with the formal parameters. For
-    example, opaque parameters that are simply type cast to a structure
-    pointer occur quite often.  In these cases, we want the local variable
-    to take priority over the parameter.  If a variable shares a Location
-    with a parameter, that location will be removed from the parameter's
-    location list.  In short, the variable hides the parameter at that
-    location.
-
-    Also, inlined functions may have parameters or local variables that
-    share locations with the containing function's variables and/or
-    parameters.  Thus, if the type stored at the location differs from
-    the containing function, we use the most specific type - the local
-    hides the pre-existing variable from that location.  But if the name
-    of the variable or parameter is "artificial" then the artificial
-    name is replaced/inherited from the variable that shares the location.
-    """
     for child in die.iter_children():
       if child.tag == 'DW_TAG_variable':
         if self._include_local_variables:
@@ -940,10 +928,8 @@ class DWARFImporter(object):
             local_var = self.import_local_variable(child, function, abstract_map)
             if local_var:
               self.import_locations(
-                  local_var, child, location_map,
-                  [LocationType.STATIC_LOCAL, LocationType.STATIC_GLOBAL])
-          # else:
-          #     self._logger.warning(f'In {function.name} variable is not concrete\n{child}')
+                local_var, child, location_map,
+                [LocationType.STATIC_LOCAL, LocationType.STATIC_GLOBAL])
       elif child.tag == 'DW_TAG_formal_parameter':
         if self._include_parameters:
           param = self.import_parameter(child, function, parent_function, abstract_map)
@@ -953,45 +939,46 @@ class DWARFImporter(object):
         function.append_parameter(None, VARIADIC)
       elif child.tag == 'DW_TAG_lexical_block':
         self.import_local_elements(
-            child, function, parent_function,
-            inside_lexical_block=True, location_map=location_map, abstract_map=abstract_map)
+          child, function, parent_function,
+          inside_lexical_block=True, location_map=location_map, abstract_map=abstract_map)
       elif child.tag == 'DW_TAG_inlined_subroutine':
         if self._include_inlined_functions:
           f = self.import_inlined_subroutine(
-              child, function if parent_function is None else parent_function,
-              location_map, abstract_map)
+            child, function if parent_function is None else parent_function,
+            location_map, abstract_map)
           function.add_inlined_function(f)
       elif child.tag == 'DW_TAG_subprogram':
         if self._dwarf_db.is_concrete_subprogram(child):
-          self._logger.warning(f'In {function.name} a concrete subprogram inside subprogram\n{child}')
+          self.import_subprogram(child)
         else:
           pass
       elif child.tag in [
-          'DW_TAG_template_type_parameter',
-          'DW_TAG_template_type_param',
-          'DW_TAG_template_value_param',
-          'DW_TAG_GNU_formal_parameter_pack',
-          'DW_TAG_GNU_template_parameter_pack',
-          'DW_TAG_GNU_call_site',
-          'DW_TAG_label',
-          'DW_TAG_imported_declaration',
-          'DW_TAG_constant',
-          # Types are picked up via the variables, as needed.
-          'DW_TAG_typedef',
-          'DW_TAG_array_type',
-          'DW_TAG_structure_type',
-          'DW_TAG_union_type',
-          'DW_TAG_class_type',
-          'DW_TAG_interface_type',
-          'DW_TAG_const_type',
-          'DW_TAG_pointer_type',
-          'DW_TAG_enumeration_type',
-          'DW_TAG_reference_type',
-          'DW_TAG_restrict_type',
-          'DW_TAG_imported_module',
-          'DW_TAG_common_block'
+        'DW_TAG_template_type_parameter',
+        'DW_TAG_template_type_param',
+        'DW_TAG_template_value_param',
+        'DW_TAG_GNU_formal_parameter_pack',
+        'DW_TAG_GNU_template_parameter_pack',
+        'DW_TAG_GNU_template_template_param',
+        'DW_TAG_GNU_call_site',
+        'DW_TAG_label',
+        'DW_TAG_imported_declaration',
+        'DW_TAG_constant',
+        'DW_TAG_imported_module',
+        'DW_TAG_common_block',
+        'DW_TAG_namelist',
+        'DW_TAG_subrange_type',
+        'DW_TAG_typedef',
+        'DW_TAG_array_type',
+        'DW_TAG_structure_type',
+        'DW_TAG_union_type',
+        'DW_TAG_class_type',
+        'DW_TAG_interface_type',
+        'DW_TAG_const_type',
+        'DW_TAG_pointer_type',
+        'DW_TAG_enumeration_type',
+        'DW_TAG_reference_type',
+        'DW_TAG_restrict_type'
       ]:
-        # TODO: use DW_TAG_label to inform control-flow reconstruction
         pass
       else:
         self._logger.warning(f'unhandled tag {child.tag} inside {die.tag}\n\tParent DIE = {die}\n\tChild DIE  = {child}')
@@ -1026,11 +1013,11 @@ class DWARFImporter(object):
       name = 'anonymous'
 
   def import_locations(
-      self,
-      element: Union[Parameter, LocalVariable],
-      die: DIE,
-      location_map: MutableMapping[Location, List[Element]],
-      location_filter
+    self,
+    element: Union[Parameter, LocalVariable],
+    die: DIE,
+    location_map: MutableMapping[Location, List[Element]],
+    location_filter
   ):
     for _, begin, end, loc_expr in self._dwarf_db.get_location_list(die):
       loc = self._location_factory.make_location(begin, end, loc_expr)
@@ -1058,7 +1045,6 @@ class DWARFImporter(object):
       assert(type_die is not None)
       var_type = self._type_factory.make_user_type(type_die)
 
-      # Check if this variable is actually a constant without a location.
       if 'DW_AT_const_value' in die.attributes and 'DW_AT_location' not in die.attributes:
         fn.add_constant(name, var_type, die.attributes['DW_AT_const_value'].value)
       else:
@@ -1090,7 +1076,7 @@ class TypeFactory(object):
     self._defined_types: MutableMapping[DIE, Type] = dict()
     self._base_types: MutableMapping[str, Type] = dict()
     self._named_composites: MutableMapping[str, Type] = dict()
-    self._logger = logging.getLogger('TypeFactory')
+    self._logger = logging.getLogger('sidekick.TypeFactory')
     self._definitions = dict()
     self._component: Optional[Component] = None
     structs = self._dwarf_db._pri._dwarf_info.structs
@@ -1116,14 +1102,11 @@ class TypeFactory(object):
     return self._make_user_type_helper(type_die, alias, visited)
 
   def _make_user_type_helper(self, type_die: DIE, alias: Optional[QualifiedName] = None, visited=None) -> Type:
-    """Create a type object to represent the DWARF type.
-    """
     if type_die in self._defined_types:
       return self._defined_types[type_die]
 
     assert(type_die)
 
-    # Detect cycles in the DIE structures.
     if type_die in visited:
       if type_die.tag == 'DW_TAG_pointer_type':
         return VOID_PTR
@@ -1159,7 +1142,6 @@ class TypeFactory(object):
       else:
         alias_type = AliasType(name=qualified_alias, type=element_type)
         if alias_type.name in self._definitions:
-          # Ensure compatibility.
           return self._definitions[alias_type.name]
         else:
           self._definitions[alias_type.name] = alias_type
@@ -1196,7 +1178,6 @@ class TypeFactory(object):
       elif type_die.tag == 'DW_TAG_rvalue_reference_type':
         pointer_type.nullable = False
       if has_name(type_die):
-        # Create a type alias and return that.
         n = self.name_of(type_die)
         assert(n)
         alias_type = AliasType(name=QualifiedName(n), type=pointer_type)
@@ -1228,7 +1209,6 @@ class TypeFactory(object):
           visited.pop()
 
           if member_type.name is None:
-            # member_type = member_type.clone()
             assert(member_type.name is not None)
           member_offset = self.member_offset_of(member_die)
           if member_offset is None and isinstance(composite_type, UnionType) and 'DW_AT_declaration' not in member_die.attributes:
@@ -1239,10 +1219,8 @@ class TypeFactory(object):
               composite_type.add_field(Field(name=n, offset=member_offset, type=member_type))
             else:
               composite_type.add_unnamed_field(Field(name=None, offset=member_offset, type=member_type))
-              # raise Exception('DW_TAG_member has no name')
           else:
             if 'DW_AT_const_value' in member_die.attributes:
-              # TODO: add constant
               pass
             elif 'DW_AT_declaration' in member_die.attributes:
               pass
@@ -1259,11 +1237,9 @@ class TypeFactory(object):
               self._logger.debug(f'Member type size is None {member_type}')
             composite_type.add_unnamed_field(Field(name=None, offset=member_offset, type=member_type))
           else:
-            self._logger.warning(f'Unsupported: inherited composite ({member_type.name})at a computed offset')
+            self._logger.warning(f'Unsupported: inherited composite ({member_type.name}) at a computed offset')
         elif member_die.tag == 'DW_TAG_variant_part':
-          # TODO: implement
           pass
-      # Compare against any prior definitions from other compilation units.
       self._defined_types[type_die] = composite_type
       if composite_type.name.is_anonymous is False:
         if composite_type.name in self._definitions:
@@ -1272,13 +1248,22 @@ class TypeFactory(object):
             if len(existing_ty) >= 0 and len(composite_type) == 0:
               return existing_ty
             elif len(composite_type) > 0 and len(existing_ty) == 0:
-              existing_ty.update(composite_type)
+              existing_ty.merge_from(composite_type)
+              return existing_ty
+            elif existing_ty.byte_size is None and composite_type.byte_size is not None:
+              existing_ty.merge_from(composite_type)
               return existing_ty
             elif existing_ty.is_equivalent(composite_type):
               return existing_ty
+
           assert(self._component is not None)
           composite_type.name = QualifiedName(self._component.name, *composite_type.name)
-          self._logger.warning(f'Conflicting type name.  Adding qualifier. ({composite_type.name})')
+          self._logger.debug(f'Conflicting type name.  Adding qualifier. ({composite_type.name})')
+          self._logger.debug(f'Existing type: ({existing_ty.__repr__()})')
+          if isinstance(existing_ty, CompositeType):
+            self._logger.debug(f'{existing_ty.byte_size=}, {existing_ty.policy.name=}, {existing_ty.name=}')
+          self._logger.debug(f'Current type: ({composite_type.__repr__()})')
+          self._logger.debug(f'{composite_type.byte_size=}, {composite_type.policy.name=}, {composite_type.name=}')
           self._definitions[composite_type.name] = composite_type
           return self._definitions[composite_type.name]
         else:
@@ -1298,7 +1283,6 @@ class TypeFactory(object):
           enum_type.add_enumerator(Enumerator(label=label, value=value))
       if enum_type.name:
         if enum_type.name in self._definitions:
-          # Ensure compatibility.
           return self._definitions[enum_type.name]
         else:
           self._definitions[enum_type.name] = enum_type
@@ -1325,11 +1309,10 @@ class TypeFactory(object):
           function_type.parameters.append(VARIADIC)
         else:
           self._logger.warning((
-              f'While defining subroutine type "{function_name}", '
-              f'encountered an unhandled tag "{param_die.tag}"'))
+            f'While defining subroutine type "{function_name}", '
+            f'encountered an unhandled tag "{param_die.tag}"'))
       if function_type.name:
         if function_type.name in self._definitions:
-          # Ensure compatibility.
           return self._definitions[function_type.name]
         else:
           self._definitions[function_type.name] = function_type
@@ -1349,7 +1332,6 @@ class TypeFactory(object):
       array_type = ArrayType(element_type=element_type, count=array_count, name=array_name)
       if array_type.name:
         if array_type.name in self._definitions:
-          # Ensure compatibility.
           return self._definitions[array_type.name]
         else:
           self._definitions[array_type.name] = array_type
@@ -1395,13 +1377,11 @@ class TypeFactory(object):
         char_type = self._base_types['char']
 
       if 'DW_AT_byte_size' in type_die.attributes:
-        # Treat it as a char array of fixed length.
         size = type_die.attributes['DW_AT_byte_size'].value
         assert(char_type.byte_size)
         array_type = StringType(char_size=char_type.byte_size, is_null_terminated=False, byte_size=size)
         return self._defined_types.setdefault(type_die, array_type)
       else:
-        # Treat it a char *.
         cptr_type = PointerType(self._addr_size, target_type=char_type)
         return self._defined_types.setdefault(type_die, cptr_type)
 
@@ -1433,7 +1413,7 @@ class TypeFactory(object):
   def member_offset_of(self, die: DIE) -> Optional[int]:
     if 'DW_AT_data_member_location' in die.attributes:
       attr = die.attributes['DW_AT_data_member_location']
-      if attr.form in ['DW_FORM_data1', 'DW_FORM_data2', 'DW_FORM_data4', 'DW_FORM_data8', 'DW_FORM_udata']:
+      if attr.form in ['DW_FORM_data1', 'DW_FORM_data2', 'DW_FORM_data4', 'DW_FORM_data8', 'DW_FORM_udata', 'DW_FORM_sdata']:
         return attr.value
       elif attr.form in ['DW_FORM_block1']:
         self._expr_parser.clear()
@@ -1482,7 +1462,7 @@ class LocationFactory(object):
     return Location(begin=begin, end=end, type=ty, expr=expr)
 
 
-def import_ELF_DWARF_into_model(elf_file: ELFFile, model: AnalysisModel, query=dict(), debug_root: str = None, logger=None):
+def import_ELF_DWARF_into_model(elf_file: ELFFile, model: AnalysisModel, query=dict(), debug_root: Optional[str] = None, logger=None):
   dwarf_db = DWARFDB(elf_file, debug_root)
   importer = DWARFImporter(dwarf_db, query, model, logger)
   importer.import_debug_info()

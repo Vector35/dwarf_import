@@ -19,8 +19,8 @@
 # IN THE SOFTWARE.
 
 from elftools.dwarf.dwarf_expr import struct_parse, bytelist2string, DW_OP_name2opcode, DW_OP_opcode2name
-from elftools.dwarf.descriptions import _REG_NAMES_x64, _REG_NAMES_x86
-from .elftools_extras import describe_reg_name, _REG_NAMES_ARM, _REG_NAMES_MIPS, _REG_NAMES_POWERPC, _REG_NAMES_AArch64
+from elftools.dwarf.descriptions import _REG_NAMES_x86
+from .elftools_extras import describe_reg_name, _REG_NAMES_x64, _REG_NAMES_ARM, _REG_NAMES_MIPS, _REG_NAMES_POWERPC, _REG_NAMES_AArch64
 from ..model.locations import ExprOp, LocationType
 from typing import List, Optional, Union
 from io import BytesIO
@@ -116,22 +116,6 @@ DW_OP_hi_user = 0xff
 
 
 class StaticExprEvaluator(object):
-  """ A DWARF expression is a sequence of instructions encoded in a block
-      of bytes. This class decodes the sequence into discrete instructions
-      with their arguments and allows generic "visiting" to process them.
-
-      Usage: subclass this class, and override the needed methods. The
-      easiest way would be to just override _after_visit, which gets passed
-      each decoded instruction (with its arguments) in order. Clients of
-      the visitor then just execute process_expr. The subclass can keep
-      its own internal information updated in _after_visit and provide
-      methods to extract it. For a good example of this usage, see the
-      ExprDumper class in the descriptions module.
-
-      A more complex usage could be to override visiting methods for
-      specific instructions, by placing them into the dispatch table.
-  """
-
   def __init__(self, structs):
     self.structs = structs
     self._init_dispatch_table()
@@ -140,30 +124,20 @@ class StaticExprEvaluator(object):
     self._cur_args = []
 
   def process_expr(self, expr: List[int]):
-    """ Process (visit) a DWARF expression. expr should be a list of
-        (integer) byte values.
-    """
     self.save_expr = expr
     self.stream = BytesIO(bytelist2string(expr))
 
     while True:
-      # Get the next opcode from the stream. If nothing is left in the
-      # stream, we're done.
       byte = self.stream.read(1)
       if len(byte) == 0:
         break
 
-      # Decode the opcode
       self._cur_opcode = ord(byte)
-
-      # Will be filled in by the visitor
       self._cur_args = []
 
-      # Dispatch to a visitor function
       visitor = self._dispatch_table.get(self._cur_opcode, self._default_visitor)
       visitor(self._cur_opcode)
 
-      # Finally call the post-visit function
       ret = self._after_visit(self._cur_opcode, self._cur_args)
       if ret is not None and ret is False:
         break
@@ -179,30 +153,21 @@ class StaticExprEvaluator(object):
 
   def _visit_OP_addr(self, opcode):
     self._cur_args = [
-        struct_parse(self.structs.Dwarf_target_addr(''), self.stream)]
+      struct_parse(self.structs.Dwarf_target_addr(''), self.stream)]
 
   def _make_visitor_arg_struct(self, struct_arg):
-    """ Create a visitor method for an opcode that that accepts a single
-        argument, specified by a struct.
-    """
     def visitor(opcode):
       self._cur_args = [struct_parse(struct_arg, self.stream)]
     return visitor
 
   def _make_visitor_arg_struct2(self, struct_arg1, struct_arg2):
-    """ Create a visitor method for an opcode that that accepts two
-        arguments, specified by structs.
-    """
     def visitor(opcode):
       self._cur_args = [
-          struct_parse(struct_arg1, self.stream),
-          struct_parse(struct_arg2, self.stream)]
+        struct_parse(struct_arg1, self.stream),
+        struct_parse(struct_arg2, self.stream)]
     return visitor
 
   def _make_visitor_arg_variable_len(self):
-    """ Create a visitor method for an opcode that that accepts two
-        arguments, specified by structs.
-    """
     def visitor(opcode):
       assert(self.stream is not None)
       n = struct_parse(self.structs.Dwarf_uleb128(''), self.stream)
@@ -246,27 +211,20 @@ class StaticExprEvaluator(object):
       add('DW_OP_reg%s' % n, self._visit_OP_with_no_args)
       add('DW_OP_breg%s' % n, self._make_visitor_arg_struct(self.structs.Dwarf_sleb128('')))
     for opname in [
-        'DW_OP_deref', 'DW_OP_dup', 'DW_OP_drop', 'DW_OP_over',
-        'DW_OP_swap', 'DW_OP_swap', 'DW_OP_rot', 'DW_OP_xderef',
-        'DW_OP_abs', 'DW_OP_and', 'DW_OP_div', 'DW_OP_minus',
-        'DW_OP_mod', 'DW_OP_mul', 'DW_OP_neg', 'DW_OP_not',
-        'DW_OP_plus', 'DW_OP_shl', 'DW_OP_shr', 'DW_OP_shra',
-        'DW_OP_xor', 'DW_OP_eq', 'DW_OP_ge', 'DW_OP_gt',
-        'DW_OP_le', 'DW_OP_lt', 'DW_OP_ne', 'DW_OP_nop',
-        'DW_OP_push_object_address', 'DW_OP_form_tls_address',
-        'DW_OP_call_frame_cfa'
+      'DW_OP_deref', 'DW_OP_dup', 'DW_OP_drop', 'DW_OP_over',
+      'DW_OP_swap', 'DW_OP_swap', 'DW_OP_rot', 'DW_OP_xderef',
+      'DW_OP_abs', 'DW_OP_and', 'DW_OP_div', 'DW_OP_minus',
+      'DW_OP_mod', 'DW_OP_mul', 'DW_OP_neg', 'DW_OP_not',
+      'DW_OP_plus', 'DW_OP_shl', 'DW_OP_shr', 'DW_OP_shra',
+      'DW_OP_xor', 'DW_OP_eq', 'DW_OP_ge', 'DW_OP_gt',
+      'DW_OP_le', 'DW_OP_lt', 'DW_OP_ne', 'DW_OP_nop',
+      'DW_OP_push_object_address', 'DW_OP_form_tls_address',
+      'DW_OP_call_frame_cfa'
     ]:
       add(opname, self._visit_OP_with_no_args)
 
 
 class ExprEval(StaticExprEvaluator):
-  """ A concrete visitor for DWARF expressions that dumps a textual
-      representation of the complete expression.
-
-      Usage: after creation, call process_expr, and then get_str for a
-      semicolon-delimited string representation of the decoded expression.
-  """
-
   def __init__(self, structs, arch):
     super(ExprEval, self).__init__(structs)
     self._arch = arch
@@ -308,43 +266,42 @@ class ExprEval(StaticExprEvaluator):
 
   def _init_lookups(self):
     self._const_ops = set([
-        DW_OP_addr,
-        DW_OP_const1u, DW_OP_const1s, DW_OP_const2u, DW_OP_const2s,
-        DW_OP_const4u, DW_OP_const4s, DW_OP_constu, DW_OP_consts,
-        DW_OP_const8u, DW_OP_const8s
+      DW_OP_addr,
+      DW_OP_const1u, DW_OP_const1s, DW_OP_const2u, DW_OP_const2s,
+      DW_OP_const4u, DW_OP_const4s, DW_OP_constu, DW_OP_consts,
+      DW_OP_const8u, DW_OP_const8s
     ])
     self._ops_with_decimal_arg = set([
-        'DW_OP_const1u', 'DW_OP_const1s', 'DW_OP_const2u', 'DW_OP_const2s',
-        'DW_OP_const4u', 'DW_OP_const4s', 'DW_OP_constu', 'DW_OP_consts',
-        'DW_OP_pick', 'DW_OP_plus_uconst', 'DW_OP_bra', 'DW_OP_skip',
-        'DW_OP_fbreg', 'DW_OP_piece', 'DW_OP__size',
-        'DW_OP_xderef_size', 'DW_OP_regx', 'DW_OP_const8u', 'DW_OP_const8s'])
+      'DW_OP_const1u', 'DW_OP_const1s', 'DW_OP_const2u', 'DW_OP_const2s',
+      'DW_OP_const4u', 'DW_OP_const4s', 'DW_OP_constu', 'DW_OP_consts',
+      'DW_OP_pick', 'DW_OP_plus_uconst', 'DW_OP_bra', 'DW_OP_skip',
+      'DW_OP_fbreg', 'DW_OP_piece', 'DW_OP__size',
+      'DW_OP_xderef_size', 'DW_OP_regx', 'DW_OP_const8u', 'DW_OP_const8s'])
 
     for n in range(0, 32):
       self._ops_with_decimal_arg.add('DW_OP_breg%s' % n)
 
     self._ops_with_two_decimal_args = set([
-        'DW_OP_bregx', 'DW_OP_bit_piece'])
+      'DW_OP_bregx', 'DW_OP_bit_piece'])
 
     self._ops_with_hex_arg = set(
-        ['DW_OP_addr', 'DW_OP_call2', 'DW_OP_call4', 'DW_OP_call_ref'])
+      ['DW_OP_addr', 'DW_OP_call2', 'DW_OP_call4', 'DW_OP_call_ref'])
 
     self._dynamic_ops = set([
-        DW_OP_shl,
-        DW_OP_deref,
-        DW_OP_deref_size,
-        DW_OP_pick,
-        DW_OP_abs
+      DW_OP_shl,
+      DW_OP_deref,
+      DW_OP_deref_size,
+      DW_OP_pick,
+      DW_OP_abs
     ])
     self._unsupported_ops = set([
-        DW_OP_piece,
-        DW_OP_dup,
-        DW_OP_bra
+      DW_OP_piece,
+      DW_OP_dup,
+      DW_OP_bra
     ])
 
   def _after_visit(self, opcode, args) -> Optional[bool]:
     if opcode == DW_OP_stack_value:
-      # The value on the stack is the actual value, not the location.
       self._is_stack_value = True
       return False
     elif opcode in self._const_ops:
@@ -371,22 +328,14 @@ class ExprEval(StaticExprEvaluator):
       regname = describe_reg_name(regnum, self._arch)
       self._stack.extend([regname, args[1], ExprOp.ADD])
     elif opcode == DW_OP_piece and len(self._stack) == 0:
-      # if you run into a DW_OP_piece and the expression stack is
-      # empty, then the bytes for the piece are optimized out.
       pass
     elif opcode == DW_OP_piece and len(self._stack) > 0 and isinstance(self.stack[-1], str):
-      # if you run into a DW_OP_piece and it refers to a register
-      # then select the subrange.
       self._stack.extend([args[0], ExprOp.VAR_FIELD])
     elif opcode == DW_OP_bit_piece and len(self._stack) == 0:
-      # if you run into a DW_OP_bit_piece and the expression stack is
-      # empty, then the bits for the piece are optimized out.
       pass
     elif opcode == DW_OP_bit_piece and len(self._stack) > 0 and isinstance(self.stack[-1], str) and args[1] == 0:
-      # the location is only the lower `args[0]` bits of the register.
       pass
     elif opcode == DW_OP_call_frame_cfa:
-      # assert(self._is_setting_frame_base)
       self._stack.append(ExprOp.CFA)
     elif opcode in self._dynamic_ops:
       self._stack.append(ExprOp.DYNAMIC)
@@ -437,12 +386,6 @@ class ExprEval(StaticExprEvaluator):
       self._stack.append(v)
       self._is_stack_value = True
 
-      # print('Expr:',[hex(x) for x in self.save_expr])
-      # print('Args:', args)
-      # print('Stack:',self._stack)
-      # print('Frame:',self._frame_base)
-      # raise Exception(f'unimplemented opcode: {hex(opcode)} {DW_OP_opcode2name.get(opcode,"UNK")}')
-
     elif DW_OP_lo_user <= opcode and opcode <= DW_OP_hi_user:
       self._stack.append(ExprOp.UNSUPPORTED)
       return False
@@ -456,37 +399,11 @@ class ExprEval(StaticExprEvaluator):
         print('Stack:', self._stack)
         print('Frame:', self._frame_base)
         raise Exception(
-            f'unimplemented opcode: '
-            f'{hex(opcode)} {DW_OP_opcode2name.get(opcode,"UNK")}\nFrame: {self._frame_base}')
-
-
-"""
-DW_OP_entry_value
-
-The DW_OP_entry_value operation pushes a value that had a known location
-upon entering the current subprogram.  It uses two operands: an unsigned
-LEB128 length, followed by a block containing a DWARF expression or
-a simple register location description.  The length gives the length
-in bytes of the block.  If the block contains a register location
-description, DW_OP_entry_value pushes the value that register had upon
-entering the current subprogram.  If the block contains a DWARF expression,
-the DWARF expression is evaluated as if it has been evaluated upon entering
-the current subprogram.  The DWARF expression should not assume any values
-being present on the DWARF stack initially and should result in exactly one
-value being added to the DWARF stack in the end.  That value is then the value
-being pushed by the DW_OP_entry_value operation.  DW_OP_push_object_address
-is not meaningful inside of this DWARF expression.
-"""
+          f'unimplemented opcode: '
+          f'{hex(opcode)} {DW_OP_opcode2name.get(opcode,"UNK")}\nFrame: {self._frame_base}')
 
 
 class LocExprParser(StaticExprEvaluator):
-  """ A concrete visitor for DWARF expressions that dumps a textual
-      representation of the complete expression.
-
-      Usage: after creation, call process_expr, and then get_str for a
-      semicolon-delimited string representation of the decoded expression.
-  """
-
   def __init__(self, structs, arch):
     super(LocExprParser, self).__init__(structs)
     self._arch = arch
@@ -557,41 +474,41 @@ class LocExprParser(StaticExprEvaluator):
 
   def _init_lookups(self):
     self._const_ops = set([
-        DW_OP_addr,
-        DW_OP_const1u, DW_OP_const1s, DW_OP_const2u, DW_OP_const2s,
-        DW_OP_const4u, DW_OP_const4s, DW_OP_constu, DW_OP_consts,
-        DW_OP_const8u, DW_OP_const8s
+      DW_OP_addr,
+      DW_OP_const1u, DW_OP_const1s, DW_OP_const2u, DW_OP_const2s,
+      DW_OP_const4u, DW_OP_const4s, DW_OP_constu, DW_OP_consts,
+      DW_OP_const8u, DW_OP_const8s
     ])
     self._ops_with_decimal_arg = set([
-        'DW_OP_const1u', 'DW_OP_const1s', 'DW_OP_const2u', 'DW_OP_const2s',
-        'DW_OP_const4u', 'DW_OP_const4s', 'DW_OP_constu', 'DW_OP_consts',
-        'DW_OP_pick', 'DW_OP_plus_uconst', 'DW_OP_bra', 'DW_OP_skip',
-        'DW_OP_fbreg', 'DW_OP_piece', 'DW_OP__size',
-        'DW_OP_xderef_size', 'DW_OP_regx', 'DW_OP_const8u', 'DW_OP_const8s'])
+      'DW_OP_const1u', 'DW_OP_const1s', 'DW_OP_const2u', 'DW_OP_const2s',
+      'DW_OP_const4u', 'DW_OP_const4s', 'DW_OP_constu', 'DW_OP_consts',
+      'DW_OP_pick', 'DW_OP_plus_uconst', 'DW_OP_bra', 'DW_OP_skip',
+      'DW_OP_fbreg', 'DW_OP_piece', 'DW_OP__size',
+      'DW_OP_xderef_size', 'DW_OP_regx', 'DW_OP_const8u', 'DW_OP_const8s'])
 
     for n in range(0, 32):
       self._ops_with_decimal_arg.add('DW_OP_breg%s' % n)
 
     self._ops_with_two_decimal_args = set([
-        'DW_OP_bregx', 'DW_OP_bit_piece'])
+      'DW_OP_bregx', 'DW_OP_bit_piece'])
 
     self._ops_with_hex_arg = set(
-        ['DW_OP_addr', 'DW_OP_call2', 'DW_OP_call4', 'DW_OP_call_ref'])
+      ['DW_OP_addr', 'DW_OP_call2', 'DW_OP_call4', 'DW_OP_call_ref'])
 
     self._dynamic_ops = set([
-        DW_OP_shl,
-        DW_OP_deref,
-        DW_OP_deref_size,
-        DW_OP_pick,
-        DW_OP_abs
+      DW_OP_shl,
+      DW_OP_deref,
+      DW_OP_deref_size,
+      DW_OP_pick,
+      DW_OP_abs
     ])
     self._unsupported_ops = set([
-        DW_OP_piece,
-        DW_OP_bit_piece,
-        DW_OP_dup,
-        DW_OP_bra,
-        0x2,
-        0x0
+      DW_OP_piece,
+      DW_OP_bit_piece,
+      DW_OP_dup,
+      DW_OP_bra,
+      0x2,
+      0x0
     ])
 
   def _reg_list(self):
@@ -611,7 +528,6 @@ class LocExprParser(StaticExprEvaluator):
 
   def _after_visit(self, opcode, args) -> Optional[bool]:
     if opcode == DW_OP_stack_value:
-      # The value on the stack is the actual value, not the location.
       self._is_stack_value = True
       return False
     elif opcode in self._const_ops:
@@ -646,22 +562,14 @@ class LocExprParser(StaticExprEvaluator):
       else:
         print('Unsupported reg num:', regnum)
     elif opcode == DW_OP_piece and len(self._stack) == 0:
-      # if you run into a DW_OP_piece and the expression stack is
-      # empty, then the bytes for the piece are optimized out.
       pass
     elif opcode == DW_OP_piece and len(self._stack) > 0 and isinstance(self.stack[-1], str):
-      # if you run into a DW_OP_piece and it refers to a register
-      # then select the subrange.
       self._stack.extend([args[0], ExprOp.VAR_FIELD])
     elif opcode == DW_OP_bit_piece and len(self._stack) == 0:
-      # if you run into a DW_OP_bit_piece and the expression stack is
-      # empty, then the bits for the piece are optimized out.
       pass
     elif opcode == DW_OP_bit_piece and len(self._stack) > 0 and isinstance(self.stack[-1], str) and args[1] == 0:
-      # the location is only the lower `args[0]` bits of the register.
       pass
     elif opcode == DW_OP_call_frame_cfa:
-      # assert(self._is_setting_frame_base)
       self._stack.append(ExprOp.CFA)
     elif opcode in self._dynamic_ops:
       self._stack.append(ExprOp.DYNAMIC)
@@ -712,12 +620,6 @@ class LocExprParser(StaticExprEvaluator):
       self._stack.append(v)
       self._is_stack_value = True
 
-      # print('Expr:',[hex(x) for x in self.save_expr])
-      # print('Args:', args)
-      # print('Stack:',self._stack)
-      # print('Frame:',self._frame_base)
-      # raise Exception(f'unimplemented opcode: {hex(opcode)} {DW_OP_opcode2name.get(opcode,"UNK")}')
-
     elif DW_OP_lo_user <= opcode and opcode <= DW_OP_hi_user:
       self._stack.append(ExprOp.UNSUPPORTED)
       return False
@@ -731,5 +633,5 @@ class LocExprParser(StaticExprEvaluator):
         print('Stack:', self._stack)
         print('Frame:', self._frame_base)
         raise Exception(
-            f'unimplemented opcode: '
-            f'{hex(opcode)} {DW_OP_opcode2name.get(opcode,"UNK")}\nFrame: {self._frame_base}')
+          f'unimplemented opcode: '
+          f'{hex(opcode)} {DW_OP_opcode2name.get(opcode,"UNK")}\nFrame: {self._frame_base}')
