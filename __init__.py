@@ -82,7 +82,7 @@ def load_symbols_from_file(bv):
 def is_valid(bv):
   raw = False
   elf = False
-  if not bv.parent_view:
+  if not bv.parent_view.length:
     return False
   for view in bv.parent_view.available_view_types:
     if view.name == "ELF":
