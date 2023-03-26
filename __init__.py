@@ -74,6 +74,7 @@ def load_symbols_from_file(bv):
 
   if not file_choice.result or not os.path.exists(file_choice.result):
     log_error(f"Input file `{file_choice.result}` does not exist")
+    bv.store_metadata("dwarf_info_applied", False)
     return
 
   DWARF_loader(bv, file_choice.result).start()
