@@ -307,7 +307,7 @@ class BinjaBridge(Observer, bn.BinaryDataNotification):
 
     elif self._parameters_mode == 'inferred':
       valid_parameter_names = [p.local_name for p in fn.parameters]
-      binja_params = binja_fn.function_type.parameters
+      binja_params = binja_fn.type.parameters
       any_matched = False
       n_args = len(binja_params)
       for i in range(n_args - 1, -1, -1):
@@ -321,9 +321,9 @@ class BinjaBridge(Observer, bn.BinaryDataNotification):
         return
 
       if n_args != len(binja_params) or fn.variadic:
-        func_type: bn.FunctionType = binja_fn.function_type
+        func_type: bn.FunctionType = binja_fn.type
         assert func_type.calling_convention
-        binja_fn.function_type = bn.Type.function(
+        binja_fn.type = bn.Type.function(
           return_type,
           binja_params[:n_args],
           func_type.calling_convention,
@@ -331,7 +331,7 @@ class BinjaBridge(Observer, bn.BinaryDataNotification):
           func_type.stack_adjustment)
         return
 
-      if return_type != binja_fn.function_type.return_value:
+      if return_type != binja_fn.type.return_value:
         binja_fn.return_type = return_type
 
   def _translate_inlined_function(
@@ -692,7 +692,7 @@ class BinjaBridge(Observer, bn.BinaryDataNotification):
       local_vars = LocationIndex(binja_function, None, self._log)
       function_type = self._create_function_type(function, binja_function, local_vars)
       if function_type is not None:
-        binja_function.function_type = function_type
+        binja_function.type = function_type
     except Exception:
       self._log.warning('while creating function type', exc_info=sys.exc_info())
 
@@ -720,6 +720,6 @@ class BinjaBridge(Observer, bn.BinaryDataNotification):
     return bn.Type.function(
       return_type,
       parameters,
-      calling_convention=binja_function.function_type.calling_convention,
+      calling_convention=binja_function.type.calling_convention,
       variable_arguments=is_variadic,
-      stack_adjust=binja_function.function_type.stack_adjustment)
+      stack_adjust=binja_function.type.stack_adjustment)
