@@ -1,6 +1,6 @@
 {
   "pluginmetadataversion": 2,
-  "name": "DWARF Import",
+  "name": "DWARF Import (Deprecated)",
   "type": [
     "core"
   ],
@@ -8,7 +8,7 @@
     "python3"
   ],
   "description": "Imports DWARF Info from ELFs",
-  "longdescription": "This loads DWARF info from an ELF and propagates function names, arguments, and type info\n\n### Analysis Without DWARF info:\n![](./images/standard_analysis.png)\n\n### Analysis With DWARF info:\n![](./images/DWARF_applied.png)\n",
+  "longdescription": "This plugin is deprecated. Please use our new DWARF Import plugin, which is shipped with the product by default: https://github.com/Vector35/binaryninja-api/issues/3206#issuecomment-1629342753",
   "license": {
     "name": "MIT",
     "text": "Copyright (c) 2020-2022 Vector 35 Inc\n\nPermission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the \"Software\"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE."
@@ -28,7 +28,7 @@
       "pyelftools==0.27"
     ]
   },
-  "version": "1.2.0",
+  "version": "1.2.1",
   "author": "Vector 35 Inc",
   "minimumbinaryninjaversion": 3000
 }

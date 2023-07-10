@@ -1,17 +1,13 @@
-# DWARF Import (v1.2.0)
+# DWARF Import (Deprecated) (v1.2.1)
 Author: **Vector 35 Inc**
 
 _Imports DWARF Info from ELFs_
 
 ## Description:
 
-This loads DWARF info from an ELF and propagates function names, arguments, and type info
+This plugin is deprecated.
 
-### Analysis Without DWARF info:
-![](./images/standard_analysis.png)
-
-### Analysis With DWARF info:
-![](./images/DWARF_applied.png)
+Please use our new DWARF Import plugin, which is shipped with the product by default: https://github.com/Vector35/binaryninja-api/issues/3206#issuecomment-1629342753
 
 
 ## Minimum Version

@@ -20,7 +20,7 @@
 
 from binaryninja import BackgroundTaskThread
 from binaryninja.binaryview import BinaryReader
-from binaryninja.log import log_error, log_warn
+from binaryninja.log import log_error, log_warn, log_alert
 from binaryninja.interaction import OpenFileNameField, get_form_input
 from binaryninja.plugin import PluginCommand
 from .bridge import BinjaBridge
@@ -52,6 +52,7 @@ class DWARF_loader(BackgroundTaskThread):
 
 
 def load_symbols(bv):
+  log_alert("This plugin is deprecated. While it will still work, we suggest that you uninstall this plugin and use our new one. See this plugin's readme.md for details.")
   try:
     if bv.query_metadata("dwarf_info_applied") == 1:
       log_warn("DWARF Debug Info has already been applied to this binary view")
@@ -62,6 +63,7 @@ def load_symbols(bv):
 
 
 def load_symbols_from_file(bv):
+  log_alert("This plugin is deprecated. While it will still work, we suggest that you uninstall this plugin and use our new one. See this plugin's readme.md for details.")
   try:
     if bv.query_metadata("dwarf_info_applied") == 1:
       log_warn("DWARF Debug Info has already been applied to this binary view")
@@ -95,5 +97,5 @@ def is_valid(bv):
   return raw and elf and ELFFile(reader).has_dwarf_info()
 
 
-PluginCommand.register("DWARF Import\\Load DWARF Symbols", "Load DWARF Symbols from the current file", load_symbols, is_valid)
-PluginCommand.register("DWARF Import\\Load DWARF Symbols From File", "Load DWARF Symbols from another file", load_symbols_from_file, lambda bv: True)
+PluginCommand.register("DWARF Import (Deprecated)\\Load DWARF Symbols", "Load DWARF Symbols from the current file", load_symbols, is_valid)
+PluginCommand.register("DWARF Import (Deprecated)\\Load DWARF Symbols From File", "Load DWARF Symbols from another file", load_symbols_from_file, lambda bv: True)
