@@ -1,4 +1,4 @@
-# Copyright(c) 2021-2022 Vector 35 Inc
+# Copyright(c) 2021-2023 Vector 35 Inc
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files(the "Software"), to
@@ -230,4 +230,3 @@ def describe_reg_name(regnum, machine_arch=None, default=True):
     if machine_arch == 'AArch64':
         return _REG_NAMES_AArch64[regnum]
     return elftools_describe_reg_name(regnum, machine_arch, default)
-  
